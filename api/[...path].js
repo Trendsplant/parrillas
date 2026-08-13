@@ -845,7 +845,6 @@ async function rollbackStrategy(req, res) {
     if (!target?.strategy) return res.status(404).json({ error: "No hay una versión anterior disponible." });
     const restored = {
       ...target.strategy,
-      mode: "live",
       audit: {
         ...target.strategy.audit,
         lastRollback: new Date().toISOString(),

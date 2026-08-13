@@ -634,7 +634,7 @@ app.get("/api/health", async (_req, res) => {
   });
 });
 
-app.get("/api/persistence/status", async (req, res) => {
+async function persistenceStatus(req, res) {
   try {
     const shop = shopOf(req);
     const state = await readState(shop);
@@ -649,9 +649,12 @@ app.get("/api/persistence/status", async (req, res) => {
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
-});
+}
 
-app.post("/api/persistence/migrate", async (req, res) => {
+app.get("/api/persistence/status", persistenceStatus);
+app.get("/api/persistence-status", persistenceStatus);
+
+async function persistenceMigrate(req, res) {
   try {
     const shop = shopOf(req);
     const session = sessionFrom(req);
@@ -667,7 +670,10 @@ app.post("/api/persistence/migrate", async (req, res) => {
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
-});
+}
+
+app.post("/api/persistence/migrate", persistenceMigrate);
+app.post("/api/persistence-migrate", persistenceMigrate);
 
 app.get("/api/visitor-context", async (req, res) => {
   const context = await buildContext(req, req.query || {}, null);

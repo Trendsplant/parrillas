@@ -1,17 +1,8 @@
-Exit code: 0
-Wall time: 1.1 seconds
-Output:
 {
   "name": "trendsplant-shopify-ordering-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
-  "dependencies": {
-    "express": "^5.1.0"
-  }
+  "scripts": { "start": "node server.js", "dev": "node --watch server.js" },
+  "dependencies": { "express": "^5.1.0" }
 }
-

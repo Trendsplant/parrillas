@@ -1,4 +1,3 @@
-
 import express from "express";
 import crypto from "node:crypto";
 import { get, put } from "@vercel/blob";
@@ -94,7 +93,7 @@ async function readState(shop) {
 
 async function writeState(shop, patch) {
   if (!process.env.BLOB_STORE_ID && !process.env.BLOB_READ_WRITE_TOKEN) {
-    throw new Error("El almacenamiento persistente no estÃ¡ conectado.");
+    throw new Error("El almacenamiento persistente no está conectado.");
   }
   const current = (await readState(shop)) || { version: STATE_VERSION, shop };
   const next = {
@@ -179,7 +178,7 @@ function authRequired(req, res, next) {
   ];
   if (publicPaths.includes(req.path) || sessionFrom(req)) return next();
   return res.status(401).json({
-    error: "AutenticaciÃ³n requerida.",
+    error: "Autenticación requerida.",
     loginUrl: "/api/auth/shopify?shop=" + DEFAULT_SHOP + ".myshopify.com",
   });
 }
@@ -263,7 +262,7 @@ async function gql(shop, query, variables = {}, req) {
   try {
     data = JSON.parse(raw);
   } catch {
-    throw new Error("Shopify devolviÃ³ una respuesta no vÃ¡lida (" + response.status + ").");
+    throw new Error("Shopify devolvió una respuesta no válida (" + response.status + ").");
   }
   if (!response.ok || data.errors) {
     throw new Error(data.errors?.map((error) => error.message).join("; ") || "Shopify GraphQL error");
@@ -355,7 +354,7 @@ async function collectionProducts(shop, handle, req, after = null) {
     req,
   );
   const collection = data.collectionByHandle;
-  if (!collection) throw new Error("ColecciÃ³n no encontrada: " + handle);
+  if (!collection) throw new Error("Colección no encontrada: " + handle);
   return {
     collection: { id: collection.id, title: collection.title, handle: collection.handle },
     products: collection.products.nodes.map((product) => ({
@@ -392,7 +391,7 @@ async function publicCollectionProducts(handle) {
     data = JSON.parse(raw);
   } catch {}
   if (!response.ok || !Array.isArray(data.products)) {
-    throw new Error("No se pudo cargar la colecciÃ³n pÃºblica (" + response.status + ").");
+    throw new Error("No se pudo cargar la colección pública (" + response.status + ").");
   }
   return {
     collection: { id: null, title: handle, handle },
@@ -564,7 +563,7 @@ function newnessScore(product) {
 function countryScore(product, country) {
   const tags = (product.tags || []).join(" ").toUpperCase();
   if (new RegExp("(^|[^A-Z])" + country + "([^A-Z]|$)").test(tags)) return 100;
-  if (country === "ES" && /SPAIN|ESPAÃ‘A|LOCAL|ALICANTE/.test(tags)) return 95;
+  if (country === "ES" && /SPAIN|ESPAÑA|LOCAL|ALICANTE/.test(tags)) return 95;
   if (/GLOBAL|WORLDWIDE|EUROPE|EU/.test(tags)) return 75;
   return 58;
 }
@@ -596,9 +595,9 @@ function rankProducts(products, context, strategy) {
           100,
       );
       const reasons = [
-        thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad tÃ©rmica media",
-        affinity >= 85 ? "Afinidad geogrÃ¡fica" : "DistribuciÃ³n global",
-        salesUnits > 0 ? salesUnits + " uds. vendidas en 30 dÃ­as" : "Sin ventas recientes registradas",
+        thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad térmica media",
+        affinity >= 85 ? "Afinidad geográfica" : "Distribución global",
+        salesUnits > 0 ? salesUnits + " uds. vendidas en 30 días" : "Sin ventas recientes registradas",
         newness >= 85 ? "Novedad" : "Producto consolidado",
         availability ? "Disponible" : "Sin stock",
       ];
@@ -611,6 +610,29 @@ function rankProducts(products, context, strategy) {
       };
     })
     .sort((a, b) => b.score - a.score || (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0));
+}
+
+function publicProductRanking(product) {
+  const salesBand = product.signals.recentSales >= 80
+    ? "Demanda reciente alta"
+    : product.signals.recentSales >= 60
+      ? "Demanda reciente media"
+      : "Demanda reciente baja";
+  return {
+    id: product.id,
+    handle: product.handle,
+    title: product.title,
+    score: product.score,
+    reasons: [product.reasons[0], product.reasons[1], salesBand, product.reasons[3], product.reasons[4]],
+    signals: {
+      thermal: product.signals.thermal,
+      affinity: product.signals.affinity,
+      recentSales: product.signals.recentSales,
+      newness: product.signals.newness,
+      availability: product.signals.availability,
+    },
+    availableForSale: product.availableForSale,
+  };
 }
 
 async function buildContext(req, overrides = {}, shop) {
@@ -658,7 +680,7 @@ async function persistenceMigrate(req, res) {
   try {
     const shop = shopOf(req);
     const session = sessionFrom(req);
-    if (!session?.accessToken) return res.status(409).json({ error: "La sesiÃ³n no contiene un token migrable." });
+    if (!session?.accessToken) return res.status(409).json({ error: "La sesión no contiene un token migrable." });
     const strategy = await loadStrategy(shop, req);
     await writeState(shop, {
       accessToken: session.accessToken,
@@ -747,7 +769,7 @@ async function applyStrategy(req, res) {
     const strategy = await loadStrategy(shop, req);
     if (strategy.mode !== "live") {
       return res.status(409).json({
-        error: "La estrategia estÃ¡ en modo simulaciÃ³n. Cambia a live antes de aplicar.",
+        error: "La estrategia está en modo simulación. Cambia a live antes de aplicar.",
       });
     }
     strategy.audit = {
@@ -793,7 +815,7 @@ app.get("/auth/callback", async (req, res) => {
   );
   const shop = shopOf(req);
   if (!saved || saved.state !== req.query.state || saved.shop !== shop) {
-    return res.status(400).send("Estado OAuth invÃ¡lido.");
+    return res.status(400).send("Estado OAuth inválido.");
   }
   try {
     const response = await fetch("https://" + shop + ".myshopify.com/admin/oauth/access_token", {
@@ -807,7 +829,7 @@ app.get("/auth/callback", async (req, res) => {
     });
     const data = await response.json();
     if (!response.ok || !data.access_token) {
-      return res.status(502).send("No se pudo completar el inicio de sesiÃ³n.");
+      return res.status(502).send("No se pudo completar el inicio de sesión.");
     }
     const expiresAt = data.expires_in
       ? Date.now() + Math.max(60, data.expires_in - 300) * 1000
@@ -866,7 +888,7 @@ async function analyticsEvent(req, res) {
       purchase: "purchases",
       session: "sessions",
     };
-    if (!keys[event]) return res.status(400).json({ error: "Evento no vÃ¡lido." });
+    if (!keys[event]) return res.status(400).json({ error: "Evento no válido." });
     const analytics = await readAnalytics(shop);
     analytics[keys[event]] = (analytics[keys[event]] || 0) + 1;
     analytics.lastEventAt = new Date().toISOString();
@@ -927,15 +949,7 @@ app.get("/api/storefront-ranking", async (req, res) => {
         weatherSource: context.weather.source,
         salesSource: context.sales.source,
       },
-      products: ranked.map((product) => ({
-        id: product.id,
-        handle: product.handle,
-        title: product.title,
-        score: product.score,
-        reasons: product.reasons,
-        signals: product.signals,
-        availableForSale: product.availableForSale,
-      })),
+      products: ranked.map(publicProductRanking),
       source,
       persistence: strategy.persistence,
     });

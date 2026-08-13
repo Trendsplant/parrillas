@@ -41,6 +41,28 @@
     }).catch(function () {});
   }
 
+  var nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    var url = typeof input === "string" ? input : input && input.url;
+    return nativeFetch(input, init).then(function (response) {
+      if (response.ok && /\/cart\/add(?:\.js)?(?:\?|$)/.test(String(url || ""))) {
+        send("add_to_cart");
+      }
+      return response;
+    });
+  };
+
+  var nativeXhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this._tpCartAdd = /\/cart\/add(?:\.js)?(?:\?|$)/.test(String(url || ""));
+    if (this._tpCartAdd) {
+      this.addEventListener("load", function () {
+        if (this.status >= 200 && this.status < 300) send("add_to_cart");
+      });
+    }
+    return nativeXhrOpen.apply(this, arguments);
+  };
+
   function cardHandle(card) {
     var node = card.querySelector("[data-product-handle]");
     if (node) return node.dataset.productHandle;

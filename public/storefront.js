@@ -10,6 +10,8 @@
   var grid = document.querySelector(gridSelector);
   var loading = false;
   var reorderTimer = null;
+  var sessionId = "tp-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  var rankingContext = { country: null, temperatureC: null };
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
   if (!grid || document.body.dataset.trendsplantOrderingBound === "1") return;
@@ -25,12 +27,15 @@
   function send(event, productId) {
     return fetch(api("/api/analytics-events"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
       body: JSON.stringify({
         shop: shop,
         event: event,
         productId: productId,
-        collectionHandle: handle
+        collectionHandle: handle,
+        sessionId: sessionId,
+        country: rankingContext.country,
+        temperatureC: rankingContext.temperatureC
       }),
       keepalive: true
     }).catch(function () {});
@@ -51,7 +56,10 @@
         return response.json();
       })
       .then(function (data) {
+        rankingContext.country = data.context && data.context.country;
+        rankingContext.temperatureC = data.context && data.context.temperatureC;
         document.body.dataset.trendsplantRankingMode = data.mode || "simulation";
+        document.body.dataset.trendsplantStrategyVersion = data.strategyVersion || "none";
         if (!data.enabled || data.mode !== "live" || !Array.isArray(data.products)) return;
 
         var order = new Map(data.products.map(function (product, index) {
@@ -68,9 +76,23 @@
           })
           .forEach(function (card) { grid.appendChild(card); });
 
-        data.products.slice(0, grid.children.length).forEach(function (product) {
-          send("impression", product.id);
+        var visibleIds = data.products.slice(0, grid.children.length).map(function (product) {
+          return product.id;
         });
+        if (visibleIds.length) {
+          fetch(api("/api/analytics-events"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
+            body: JSON.stringify({
+              shop: shop,
+              event: "impression_batch",
+              productIds: visibleIds,
+              collectionHandle: handle,
+              sessionId: sessionId
+            }),
+            keepalive: true
+          }).catch(function () {});
+        }
       })
       .catch(function () {
         document.body.dataset.trendsplantRankingMode = "unavailable";
@@ -87,6 +109,21 @@
       });
     });
   }
+
+  document.addEventListener("submit", function (event) {
+    var form = event.target && event.target.closest('form[action*="/cart/add"]');
+    if (!form) return;
+    var product = form.querySelector('[name="product-id"],[name="id"]');
+    send("add_to_cart", product && product.value);
+  }, true);
+
+  document.addEventListener("click", function (event) {
+    var button = event.target && event.target.closest('[name="add"],[data-add-to-cart],button[type="submit"]');
+    var form = button && button.closest('form[action*="/cart/add"]');
+    if (!form) return;
+    var product = form.querySelector('[name="product-id"],[name="id"]');
+    send("add_to_cart", product && product.value);
+  }, true);
 
   function scheduleRefresh() {
     wireCards();
@@ -126,6 +163,7 @@
     }
   }).observe(grid, { childList: true });
 
+  send("session");
   scheduleRefresh();
 
   var nativeInfinite = document.querySelector("#AjaxinatePagination.pagination--infinite");
@@ -140,3 +178,4 @@
     }, { rootMargin: "700px" }).observe(sentinel);
   }
 })();
+

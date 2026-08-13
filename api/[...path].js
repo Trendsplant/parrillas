@@ -143,7 +143,8 @@ async function writeState(shop, patch) {
     access: "private",
     addRandomSuffix: false,
     allowOverwrite: true,
-    contentType: "application/octet-stream",
+    contentType: "applicatio
+n/octet-stream",
     cacheControlMaxAge: 60,
   });
   return next;
@@ -265,7 +266,8 @@ async function shopToken(shop, req) {
 
   const state = await readState(shop).catch(() => null);
   if (state?.accessToken && (!state.accessTokenExpiresAt || Date.now() < state.accessTokenExpiresAt)) {
-    tokenCache.set(shop, {
+    tokenCache
+.set(shop, {
       value: state.accessToken,
       expiresAt: state.accessTokenExpiresAt || Date.now() + 60 * 60 * 1000,
     });
@@ -397,7 +399,8 @@ async function saveStrategy(shop, next, req, options = {}) {
     },
     ...(state.strategyVersions || []),
   ].slice(0, MAX_STRATEGY_VERSIONS);
-  memoryStrategy = strategy;
+  memoryStr
+ategy = strategy;
   await writeState(shop, {
     strategy,
     strategyVersions: versions,
@@ -499,7 +502,8 @@ async function publicCollectionProducts(handle) {
         availableForSale: variants.some((variant) => variant.available),
         featuredImage: image ? { url: image.src || image.url, altText: image.alt || product.title } : null,
         priceRangeV2: {
-          minVariantPrice: { amount: String(variants[0]?.price || 0), currencyCode: "EUR" },
+          minVariantPrice: { amount: String(variants[0]?.price || 0), currencyC
+ode: "EUR" },
         },
       };
     }),
@@ -608,7 +612,194 @@ async function recentSalesByProduct(shop, req) {
       );
       for (const order of data.orders.nodes) {
         for (const item of order.lineItems.nodes) {
-          if (item.product?.id) totals[item.…1826 tokens truncated…q, res) => {
+          if (item.product?.id) totals[item.product
+.id] = (totals[item.product.id] || 0) + item.quantity;
+        }
+      }
+      after = data.orders.pageInfo.hasNextPage ? data.orders.pageInfo.endCursor : null;
+      guard += 1;
+    } while (after && guard < 5);
+    const value = { totals, source: "shopify_orders_30d", measuredAt: new Date().toISOString() };
+    salesCache.set(shop, { value, expiresAt: Date.now() + SALES_TTL_MS });
+    return value;
+  } catch (error) {
+    return {
+      totals: {},
+      source: /access|scope|denied/i.test(String(error?.message || error))
+        ? "shopify_orders_scope_unavailable"
+        : "shopify_orders_unavailable",
+      measuredAt: new Date().toISOString(),
+    };
+  }
+}
+
+function classify(product) {
+  const text = (product.title + " " + product.productType + " " + (product.tags || []).join(" ")).toLowerCase();
+  if (/shirt|tee|linen|short|swim|cap|hat|tank|polo/.test(text)) return "light";
+  if (/hood|sweat|jacket|fleece|wool|knit|corduroy|coat|beanie/.test(text)) return "warm";
+  if (/pant|denim|trouser|chino/.test(text)) return "mid";
+  return "core";
+}
+
+function temperatureScore(type, temperature) {
+  if (temperature >= 27) return type === "light" ? 100 : type === "core" ? 65 : type === "mid" ? 55 : 25;
+  if (temperature >= 20) return type === "light" ? 88 : type === "core" ? 80 : type === "mid" ? 72 : 55;
+  if (temperature <= 10) return type === "warm" ? 100 : type === "mid" ? 72 : type === "core" ? 55 : 25;
+  if (temperature <= 16) return type === "warm" ? 90 : type === "mid" ? 82 : type === "core" ? 70 : 50;
+  return type === "mid" || type === "core" ? 82 : 72;
+}
+
+function newnessScore(product) {
+  const date = new Date(product.publishedAt || product.createdAt || 0).getTime();
+  if (!date) return 50;
+  const days = (Date.now() - date) / 86400000;
+  if (days <= 14) return 100;
+  if (days <= 30) return 88;
+  if (days <= 90) return 68;
+  if (days <= 180) return 52;
+  return 35;
+}
+
+function countryScore(product, country) {
+  const tags = (product.tags || []).join(" ").toUpperCase();
+  if (new RegExp("(^|[^A-Z])" + country + "([^A-Z]|$)").test(tags)) return 100;
+  if (country === "ES" && /SPAIN|ESPAÑA|LOCAL|ALICANTE/.test(tags)) return 95;
+  if (/GLOBAL|WORLDWIDE|EUROPE|EU/.test(tags)) return 75;
+  return 58;
+}
+
+function rankProducts(products, context, strategy) {
+  const weights = strategy.weights;
+  const salesTotals = context.sales?.totals || {};
+  const maxSales = Math.max(0, ...Object.values(salesTotals));
+  const temperature = Number(context.weather?.temperatureC ?? context.temperatureC ?? 22);
+
+  return products
+    .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale)
+    .map((product) => {
+      const type = classify(product);
+      const thermal = temperatureScore(type, temperature);
+      const affinity = countryScore(product, context.geo?.country || context.country || "ES");
+      const availability = product.availableForSale ? 100 : 0;
+      const newness = newnessScore(product);
+      const salesUnits = Number(salesTotals[product.id] || 0);
+      const recentSales = maxSales
+        ? Math.round(40 + (60 * Math.log1p(salesUnits)) / Math.log1p(maxSales))
+        : 50;
+      const score = Math.round(
+        (thermal * weights.temperatureFit +
+          affinity * weights.countryAffinity +
+          recentSales * weights.recentSales +
+          newness * weights.newness +
+          availability * weights.availability) /
+          100,
+      );
+      const reasons = [
+        thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad térmica media",
+        affinity >= 85 ? "Afinidad geográfica" : "Distribución global",
+        salesUnits > 0 ? salesUnits + " uds. vendidas en 30 días" : "Sin ventas recientes registradas",
+        newness >= 85 ? "Novedad" : "Producto consolidado",
+        availability ? "Disponible" : "Sin stock",
+      ];
+      return {
+        ...product,
+        type,
+        score,
+        signals: { thermal, affinity, recentSales, newness, availability, salesUn
+its },
+        reasons,
+      };
+    })
+    .sort((a, b) => b.score - a.score || (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0));
+}
+
+function publicProductRanking(product) {
+  const salesBand = product.signals.recentSales >= 80
+    ? "Demanda reciente alta"
+    : product.signals.recentSales >= 60
+      ? "Demanda reciente media"
+      : "Demanda reciente baja";
+  return {
+    id: product.id,
+    handle: product.handle,
+    title: product.title,
+    score: product.score,
+    reasons: [product.reasons[0], product.reasons[1], salesBand, product.reasons[3], product.reasons[4]],
+    signals: {
+      thermal: product.signals.thermal,
+      affinity: product.signals.affinity,
+      recentSales: product.signals.recentSales,
+      newness: product.signals.newness,
+      availability: product.signals.availability,
+    },
+    availableForSale: product.availableForSale,
+  };
+}
+
+async function buildContext(req, overrides = {}, shop) {
+  const geo = geoFromRequest(req, overrides);
+  const [weather, sales] = await Promise.all([
+    weatherFor(geo, overrides.temperatureC),
+    shop ? recentSalesByProduct(shop, req) : Promise.resolve({ totals: {}, source: "not_requested" }),
+  ]);
+  return { geo, weather, sales, generatedAt: new Date().toISOString() };
+}
+
+app.get("/api/health", async (_req, res) => {
+  let persistence = "unavailable";
+  if (process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN) persistence = "vercel_private_blob";
+  res.json({
+    ok: true,
+    service: "trendsplant-ordering-app",
+    phase: "storefront-control-observability",
+    persistence,
+    signals: ["geo_ip", "temperature", "recent_sales", "newness", "availability"],
+    capabilities: ["strategy_versions", "rollback", "analytics_dimensions", "orders_webhook", "rate_limits", "ranking_cache"],
+  });
+});
+
+async function persistenceStatus(req, res) {
+  try {
+    const shop = shopOf(req);
+    const state = await readState(shop);
+    res.json({
+      connected: Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN),
+      persisted: Boolean(state),
+      hasToken: Boolean(state?.accessToken),
+      hasStrategy: Boolean(state?.strategy),
+      version: state?.version || null,
+      updatedAt: state?.updatedAt || null,
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/persistence/status", persistenceStatus);
+app.get("/api/persistence-status", persistenceStatus);
+
+async function persistenceMigrate(req, res) {
+  try {
+    const shop = shopOf(req);
+    const session = sessionFrom(req);
+    if (!session?.accessToken) return res.status(409).json({ error: "La sesión no contiene un token migrable." });
+    const strategy = await loadStrategy(shop, req);
+    await writeState(shop, {
+      accessToken: session.accessToken,
+      accessTokenExpiresAt: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000,
+      strategy: { ...strategy, persistence: undefined },
+      sessionMigratedAt: new Date().toISOString(),
+    });
+    res.json({ ok: true, persistence: "vercel_private_blob" });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.post("/api/persistence/migrate", persistenceMigrate);
+app.post("/api/persistence-migrate", persistenceMigrate);
+
+app.get("/api/visitor-context", async (req, res) => {
   const context = await buildContext(req, req.query || {}, null);
   res.json({ geo: context.geo, weather: context.weather, generatedAt: context.generatedAt });
 });
@@ -632,7 +823,8 @@ app.put("/api/strategy", async (req, res) => {
 async function strategyVersions(req, res) {
   try {
     const state = await readState(shopOf(req));
-    const versions = (state?.strategyVersions || []).map(({ strategy, ...version }) => ({
+    const versions 
+= (state?.strategyVersions || []).map(({ strategy, ...version }) => ({
       ...version,
       collectionHandle: strategy?.collectionHandle,
       mode: strategy?.mode,
@@ -758,7 +950,8 @@ async function applyStrategy(req, res) {
 }
 
 app.post("/api/strategy/apply", applyStrategy);
-app.post("/api/strategy-apply", applyStrategy);
+app.post("/api/strategy-apply", app
+lyStrategy);
 
 app.get("/auth/shopify", (req, res) => {
   const shop = shopOf(req);
@@ -879,7 +1072,8 @@ function temperatureBand(value) {
 function eventAllowed(req, shop) {
   const anonymousId = String(req.headers["x-tp-session"] || req.body?.sessionId || "anonymous").slice(0, 100);
   const key = crypto.createHash("sha256").update(shop + ":" + anonymousId).digest("hex").slice(0, 24);
-  const now = Date.now();
+  const now = Date.no
+w();
   const bucket = eventRateBuckets.get(key);
   if (!bucket || now - bucket.startedAt >= EVENT_RATE_WINDOW_MS) {
     eventRateBuckets.set(key, { startedAt: now, count: 1 });
@@ -983,7 +1177,8 @@ async function analyticsSummary(req, res) {
     const persistentErrors = analytics.operational.invalidEvents || 0;
     const alerts = [];
     if (!analytics.lastEventAt) alerts.push({ level: "info", message: "Aún no se han recibido eventos del storefront." });
-    else if (Date.now() - Date.parse(analytics.lastEventAt) > 24 * 60 * 60 * 1000) {
+    else if (D
+ate.now() - Date.parse(analytics.lastEventAt) > 24 * 60 * 60 * 1000) {
       alerts.push({ level: "warning", message: "No hay eventos nuevos desde hace más de 24 horas." });
     }
     if (!state?.integrations?.ordersWebhook?.active) {
@@ -1083,7 +1278,8 @@ async function ensureOrdersWebhook(shop, req) {
   if (!webhook) {
     const created = await gql(
       shop,
-      "mutation Hook($topic:WebhookSubscriptionTopic!,$subscription:WebhookSubscriptionInput!){webhookSubscriptionCreate(topic:$topic,webhookSubscription:$subscription){webhookSubscription{id uri topic}userErrors{field message}}}",
+      "mutation Hook($topic:WebhookSubscriptionTopic!,$subscription:WebhookSubscript
+ionInput!){webhookSubscriptionCreate(topic:$topic,webhookSubscription:$subscription){webhookSubscription{id uri topic}userErrors{field message}}}",
       { topic: "ORDERS_CREATE", subscription: { uri: callbackUrl } },
       req,
     );

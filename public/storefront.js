@@ -15,7 +15,7 @@
   var lastAddToCartAt = 0;
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
-  if (!grid || document.body.dataset.trendsplantOrderingBound === "1") return;
+  if (document.body.dataset.trendsplantOrderingBound === "1") return;
   document.body.dataset.trendsplantOrderingBound = "1";
 
   var pathMatch = location.pathname.match(/\/collections\/([^/]+)/);
@@ -79,6 +79,7 @@
   }
 
   function reorder() {
+    if (!grid) return Promise.resolve();
     return fetch(api("/api/storefront-ranking") + "&handle=" + encodeURIComponent(handle))
       .then(function (response) {
         if (!response.ok) throw new Error("Ranking API " + response.status);
@@ -132,6 +133,7 @@
   }
 
   function wireCards() {
+    if (!grid) return;
     Array.from(grid.querySelectorAll('a[href*="/products/"]')).forEach(function (link) {
       if (link.dataset.tpWired) return;
       link.dataset.tpWired = "1";
@@ -160,6 +162,7 @@
   }, true);
 
   function scheduleRefresh() {
+    if (!grid) return;
     wireCards();
     clearTimeout(reorderTimer);
     reorderTimer = setTimeout(reorder, 120);
@@ -191,17 +194,19 @@
       .finally(function () { loading = false; });
   }
 
-  new MutationObserver(function (mutations) {
-    if (mutations.some(function (mutation) { return mutation.addedNodes.length > 0; })) {
-      scheduleRefresh();
-    }
-  }).observe(grid, { childList: true });
+  if (grid) {
+    new MutationObserver(function (mutations) {
+      if (mutations.some(function (mutation) { return mutation.addedNodes.length > 0; })) {
+        scheduleRefresh();
+      }
+    }).observe(grid, { childList: true });
+  }
 
   send("session");
   scheduleRefresh();
 
   var nativeInfinite = document.querySelector("#AjaxinatePagination.pagination--infinite");
-  if (!nativeInfinite) {
+  if (grid && !nativeInfinite) {
     var sentinel = document.createElement("div");
     sentinel.setAttribute("aria-hidden", "true");
     sentinel.dataset.trendsplantSentinel = "true";

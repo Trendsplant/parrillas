@@ -143,8 +143,7 @@ async function writeState(shop, patch) {
     access: "private",
     addRandomSuffix: false,
     allowOverwrite: true,
-    contentType: "applicatio
-n/octet-stream",
+    contentType: "application/octet-stream",
     cacheControlMaxAge: 60,
   });
   return next;
@@ -266,8 +265,7 @@ async function shopToken(shop, req) {
 
   const state = await readState(shop).catch(() => null);
   if (state?.accessToken && (!state.accessTokenExpiresAt || Date.now() < state.accessTokenExpiresAt)) {
-    tokenCache
-.set(shop, {
+    tokenCache.set(shop, {
       value: state.accessToken,
       expiresAt: state.accessTokenExpiresAt || Date.now() + 60 * 60 * 1000,
     });
@@ -399,8 +397,7 @@ async function saveStrategy(shop, next, req, options = {}) {
     },
     ...(state.strategyVersions || []),
   ].slice(0, MAX_STRATEGY_VERSIONS);
-  memoryStr
-ategy = strategy;
+  memoryStrategy = strategy;
   await writeState(shop, {
     strategy,
     strategyVersions: versions,
@@ -502,8 +499,7 @@ async function publicCollectionProducts(handle) {
         availableForSale: variants.some((variant) => variant.available),
         featuredImage: image ? { url: image.src || image.url, altText: image.alt || product.title } : null,
         priceRangeV2: {
-          minVariantPrice: { amount: String(variants[0]?.price || 0), currencyC
-ode: "EUR" },
+          minVariantPrice: { amount: String(variants[0]?.price || 0), currencyCode: "EUR" },
         },
       };
     }),
@@ -612,8 +608,7 @@ async function recentSalesByProduct(shop, req) {
       );
       for (const order of data.orders.nodes) {
         for (const item of order.lineItems.nodes) {
-          if (item.product?.id) totals[item.product
-.id] = (totals[item.product.id] || 0) + item.quantity;
+          if (item.product?.id) totals[item.product.id] = (totals[item.product.id] || 0) + item.quantity;
         }
       }
       after = data.orders.pageInfo.hasNextPage ? data.orders.pageInfo.endCursor : null;
@@ -705,8 +700,7 @@ function rankProducts(products, context, strategy) {
         ...product,
         type,
         score,
-        signals: { thermal, affinity, recentSales, newness, availability, salesUn
-its },
+        signals: { thermal, affinity, recentSales, newness, availability, salesUnits },
         reasons,
       };
     })
@@ -823,8 +817,7 @@ app.put("/api/strategy", async (req, res) => {
 async function strategyVersions(req, res) {
   try {
     const state = await readState(shopOf(req));
-    const versions 
-= (state?.strategyVersions || []).map(({ strategy, ...version }) => ({
+    const versions = (state?.strategyVersions || []).map(({ strategy, ...version }) => ({
       ...version,
       collectionHandle: strategy?.collectionHandle,
       mode: strategy?.mode,
@@ -950,8 +943,7 @@ async function applyStrategy(req, res) {
 }
 
 app.post("/api/strategy/apply", applyStrategy);
-app.post("/api/strategy-apply", app
-lyStrategy);
+app.post("/api/strategy-apply", applyStrategy);
 
 app.get("/auth/shopify", (req, res) => {
   const shop = shopOf(req);
@@ -1072,8 +1064,7 @@ function temperatureBand(value) {
 function eventAllowed(req, shop) {
   const anonymousId = String(req.headers["x-tp-session"] || req.body?.sessionId || "anonymous").slice(0, 100);
   const key = crypto.createHash("sha256").update(shop + ":" + anonymousId).digest("hex").slice(0, 24);
-  const now = Date.no
-w();
+  const now = Date.now();
   const bucket = eventRateBuckets.get(key);
   if (!bucket || now - bucket.startedAt >= EVENT_RATE_WINDOW_MS) {
     eventRateBuckets.set(key, { startedAt: now, count: 1 });
@@ -1177,8 +1168,7 @@ async function analyticsSummary(req, res) {
     const persistentErrors = analytics.operational.invalidEvents || 0;
     const alerts = [];
     if (!analytics.lastEventAt) alerts.push({ level: "info", message: "Aún no se han recibido eventos del storefront." });
-    else if (D
-ate.now() - Date.parse(analytics.lastEventAt) > 24 * 60 * 60 * 1000) {
+    else if (Date.now() - Date.parse(analytics.lastEventAt) > 24 * 60 * 60 * 1000) {
       alerts.push({ level: "warning", message: "No hay eventos nuevos desde hace más de 24 horas." });
     }
     if (!state?.integrations?.ordersWebhook?.active) {
@@ -1278,8 +1268,7 @@ async function ensureOrdersWebhook(shop, req) {
   if (!webhook) {
     const created = await gql(
       shop,
-      "mutation Hook($topic:WebhookSubscriptionTopic!,$subscription:WebhookSubscript
-ionInput!){webhookSubscriptionCreate(topic:$topic,webhookSubscription:$subscription){webhookSubscription{id uri topic}userErrors{field message}}}",
+      "mutation Hook($topic:WebhookSubscriptionTopic!,$subscription:WebhookSubscriptionInput!){webhookSubscriptionCreate(topic:$topic,webhookSubscription:$subscription){webhookSubscription{id uri topic}userErrors{field message}}}",
       { topic: "ORDERS_CREATE", subscription: { uri: callbackUrl } },
       req,
     );
@@ -1369,5 +1358,4 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
-
 

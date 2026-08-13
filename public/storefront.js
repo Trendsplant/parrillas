@@ -12,6 +12,7 @@
   var reorderTimer = null;
   var sessionId = "tp-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var rankingContext = { country: null, temperatureC: null };
+  var lastAddToCartAt = 0;
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
   if (!grid || document.body.dataset.trendsplantOrderingBound === "1") return;
@@ -41,12 +42,18 @@
     }).catch(function () {});
   }
 
+  function sendAddToCart(productId) {
+    if (Date.now() - lastAddToCartAt < 1200) return;
+    lastAddToCartAt = Date.now();
+    send("add_to_cart", productId);
+  }
+
   var nativeFetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
     var url = typeof input === "string" ? input : input && input.url;
     return nativeFetch(input, init).then(function (response) {
       if (response.ok && /\/cart\/add(?:\.js)?(?:\?|$)/.test(String(url || ""))) {
-        send("add_to_cart");
+        sendAddToCart();
       }
       return response;
     });
@@ -57,7 +64,7 @@
     this._tpCartAdd = /\/cart\/add(?:\.js)?(?:\?|$)/.test(String(url || ""));
     if (this._tpCartAdd) {
       this.addEventListener("load", function () {
-        if (this.status >= 200 && this.status < 300) send("add_to_cart");
+        if (this.status >= 200 && this.status < 300) sendAddToCart();
       });
     }
     return nativeXhrOpen.apply(this, arguments);
@@ -139,15 +146,17 @@
     var form = event.target && event.target.closest('form[action*="/cart/add"]');
     if (!form) return;
     var product = form.querySelector('[name="product-id"],[name="id"]');
-    send("add_to_cart", product && product.value);
+    sendAddToCart(product && product.value);
   }, true);
 
   document.addEventListener("click", function (event) {
-    var button = event.target && event.target.closest('[name="add"],[data-add-to-cart],button[type="submit"]');
-    var form = button && button.closest('form[action*="/cart/add"]');
-    if (!form) return;
-    var product = form.querySelector('[name="product-id"],[name="id"]');
-    send("add_to_cart", product && product.value);
+    var button = event.target && event.target.closest('button,[name="add"],[data-add-to-cart]');
+    if (!button) return;
+    var form = button.closest('form[action*="/cart/add"]');
+    var label = String(button.getAttribute("aria-label") || button.textContent || "").trim();
+    if (!form && !/añadir|add(?:\s+to)?\s+cart/i.test(label)) return;
+    var product = form && form.querySelector('[name="product-id"],[name="id"]');
+    sendAddToCart(product && product.value);
   }, true);
 
   function scheduleRefresh() {

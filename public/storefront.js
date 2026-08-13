@@ -60,21 +60,7 @@
         rankingContext.temperatureC = data.context && data.context.temperatureC;
         document.body.dataset.trendsplantRankingMode = data.mode || "simulation";
         document.body.dataset.trendsplantStrategyVersion = data.strategyVersion || "none";
-        if (!data.enabled || data.mode !== "live" || !Array.isArray(data.products)) return;
-
-        var order = new Map(data.products.map(function (product, index) {
-          return [product.handle, index];
-        }));
-
-        Array.from(grid.children)
-          .sort(function (a, b) {
-            var ah = cardHandle(a);
-            var bh = cardHandle(b);
-            var ai = order.has(ah) ? order.get(ah) : 999999;
-            var bi = order.has(bh) ? order.get(bh) : 999999;
-            return ai - bi;
-          })
-          .forEach(function (card) { grid.appendChild(card); });
+        if (!data.enabled || !Array.isArray(data.products)) return;
 
         var visibleIds = data.products.slice(0, grid.children.length).map(function (product) {
           return product.id;
@@ -93,6 +79,23 @@
             keepalive: true
           }).catch(function () {});
         }
+
+        if (data.mode !== "live") return;
+
+        var order = new Map(data.products.map(function (product, index) {
+          return [product.handle, index];
+        }));
+
+        Array.from(grid.children)
+          .sort(function (a, b) {
+            var ah = cardHandle(a);
+            var bh = cardHandle(b);
+            var ai = order.has(ah) ? order.get(ah) : 999999;
+            var bi = order.has(bh) ? order.get(bh) : 999999;
+            return ai - bi;
+          })
+          .forEach(function (card) { grid.appendChild(card); });
+
       })
       .catch(function () {
         document.body.dataset.trendsplantRankingMode = "unavailable";
@@ -178,4 +181,3 @@
     }, { rootMargin: "700px" }).observe(sentinel);
   }
 })();
-

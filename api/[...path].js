@@ -739,6 +739,65 @@ async function buildContext(req, overrides = {}, shop) {
   return { geo, weather, sales, generatedAt: new Date().toISOString() };
 }
 
+function collectionRankingMoves(currentProducts, rankedProducts, limit = 250) {
+  const order = currentProducts.map((product) => product.id);
+  const moves = [];
+  for (const [position, product] of rankedProducts.slice(0, limit).entries()) {
+    const currentPosition = order.indexOf(product.id);
+    if (currentPosition < 0 || currentPosition === position) continue;
+    moves.push({ id: product.id, newPosition: String(position) });
+    order.splice(currentPosition, 1);
+    order.splice(position, 0, product.id);
+  }
+  return moves;
+}
+
+async function publishCollectionRanking(shop, strategy, req) {
+  const data = await allCollectionProducts(shop, strategy.collectionHandle || "men", req);
+  const context = await buildContext(req, req.body || {}, shop);
+  const ranked = rankProducts(data.products, context, strategy);
+  if (!data.collection?.id) throw new Error("No se pudo identificar la colección para publicar el ranking.");
+
+  const update = await gql(
+    shop,
+    "mutation Manual($collection:CollectionUpdateInput!){collectionUpdate(collection:$collection){collection{id sortOrder}userErrors{field message}}}",
+    { collection: { id: data.collection.id, sortOrder: "MANUAL" } },
+    req,
+  );
+  const updateErrors = update.collectionUpdate.userErrors || [];
+  if (updateErrors.length) throw new Error(updateErrors.map((error) => error.message).join("; "));
+
+  const moves = collectionRankingMoves(data.products, ranked);
+  if (!moves.length) {
+    return {
+      ok: true,
+      status: "already_ranked",
+      movedCount: 0,
+      salesSource: context.sales?.source,
+      topHandles: ranked.slice(0, 10).map((product) => product.handle),
+    };
+  }
+
+  const result = await gql(
+    shop,
+    "mutation Reorder($id:ID!,$moves:[MoveInput!]!){collectionReorderProducts(id:$id,moves:$moves){job{id done}userErrors{field message}}}",
+    { id: data.collection.id, moves },
+    req,
+  );
+  const reorder = result.collectionReorderProducts;
+  if (reorder.userErrors?.length) {
+    throw new Error(reorder.userErrors.map((error) => error.message).join("; "));
+  }
+  return {
+    ok: true,
+    status: reorder.job?.done ? "complete" : "processing",
+    jobId: reorder.job?.id || null,
+    movedCount: moves.length,
+    salesSource: context.sales?.source,
+    topHandles: ranked.slice(0, 10).map((product) => product.handle),
+  };
+}
+
 app.get("/api/health", async (_req, res) => {
   let persistence = "unavailable";
   if (process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN) persistence = "neon_postgres";
@@ -919,6 +978,7 @@ async function applyStrategy(req, res) {
         error: "La estrategia está en modo simulación. Cambia a live antes de aplicar.",
       });
     }
+    const collectionOrdering = await publishCollectionRanking(shop, strategy, req);
     const saved = await saveStrategy(shop, strategy, req, {
       action: "apply",
       publish: true,
@@ -932,8 +992,11 @@ async function applyStrategy(req, res) {
     }
     res.json({
       ok: true,
-      message: "Estrategia live versionada y disponible para el storefront.",
+      message: collectionOrdering.status === "processing"
+        ? "Estrategia live aplicada. Shopify está terminando de ordenar la colección."
+        : "Estrategia live aplicada y colección reordenada según el ranking.",
       strategy: saved,
+      collectionOrdering,
       webhook,
     });
   } catch (error) {

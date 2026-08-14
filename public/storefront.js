@@ -105,7 +105,11 @@
     if (rankingData) return Promise.resolve(rankingData);
     if (rankingPromise) return rankingPromise;
 
-    var rankingUrl = api("/api/storefront-ranking") +\n      "&handle=" + encodeURIComponent(handle) +\n      "&_tp_rank=" + Date.now();\n\n    rankingPromise = fetch(rankingUrl, { cache: "no-store" })
+    var rankingUrl = api("/api/storefront-ranking") +
+      "&handle=" + encodeURIComponent(handle) +
+      "&_tp_rank=" + Date.now();
+
+    rankingPromise = fetch(rankingUrl, { cache: "no-store" })
       .then(function (response) {
         if (!response.ok) throw new Error("Ranking API " + response.status);
         return response.json();

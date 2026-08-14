@@ -1,6 +1,6 @@
 import express from "express";
 import crypto from "node:crypto";
-import { get, put } from "@vercel/blob";
+import { neon } from "@neondatabase/serverless";
 
 const app = express();
 app.use(express.json({
@@ -105,32 +105,35 @@ function open(value) {
   }
 }
 
-function statePath(shop) {
-  const id = crypto.createHash("sha256").update(shop).digest("hex").slice(0, 24);
-  return "shops/" + id + "/state.enc";
+const DATABASE_URL = process.env.NEON_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+let sql;
+let stateStorageReady = false;
+
+function database() {
+  if (!DATABASE_URL) {
+    throw new Error("La base de datos Neon no está conectada.");
+  }
+  sql ||= neon(DATABASE_URL);
+  return sql;
 }
 
-async function streamToText(stream) {
-  if (!stream) return "";
-  return new Response(stream).text();
+async function ensureStateStorage() {
+  if (stateStorageReady) return;
+  await database()`CREATE TABLE IF NOT EXISTS trendsplant_app_state (
+    shop TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`;
+  stateStorageReady = true;
 }
 
 async function readState(shop) {
-  if (!process.env.BLOB_STORE_ID && !process.env.BLOB_READ_WRITE_TOKEN) return null;
-  try {
-    const result = await get(statePath(shop), { access: "private", useCache: false });
-    if (!result || result.statusCode !== 200) return null;
-    return open(await streamToText(result.stream));
-  } catch (error) {
-    if (/not found|404/i.test(String(error?.message || error))) return null;
-    throw error;
-  }
+  await ensureStateStorage();
+  const rows = await database()`SELECT payload FROM trendsplant_app_state WHERE shop = ${shop} LIMIT 1`;
+  return rows[0]?.payload ? open(rows[0].payload) : null;
 }
 
 async function writeState(shop, patch) {
-  if (!process.env.BLOB_STORE_ID && !process.env.BLOB_READ_WRITE_TOKEN) {
-    throw new Error("El almacenamiento persistente no está conectado.");
-  }
   const current = (await readState(shop)) || { version: STATE_VERSION, shop };
   const next = {
     ...current,
@@ -139,13 +142,10 @@ async function writeState(shop, patch) {
     shop,
     updatedAt: new Date().toISOString(),
   };
-  await put(statePath(shop), seal(next), {
-    access: "private",
-    addRandomSuffix: false,
-    allowOverwrite: true,
-    contentType: "application/octet-stream",
-    cacheControlMaxAge: 60,
-  });
+  await database()`INSERT INTO trendsplant_app_state (shop, payload, updated_at)
+    VALUES (${shop}, ${seal(next)}, NOW())
+    ON CONFLICT (shop) DO UPDATE
+    SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`;
   return next;
 }
 
@@ -318,7 +318,7 @@ async function loadStrategy(shop, req) {
     return {
       ...memoryStrategy,
       versionCount: state.strategyVersions?.length || 0,
-      persistence: "vercel_private_blob",
+      persistence: "neon_postgres",
     };
   }
 
@@ -357,7 +357,7 @@ async function loadPublishedStrategy(shop, req) {
       ...structuredClone(DEFAULT_STRATEGY),
       ...state.publishedStrategy,
       weights: normalizeWeights(state.publishedStrategy.weights),
-      persistence: "vercel_private_blob",
+      persistence: "neon_postgres",
     };
   }
   return loadStrategy(shop, req);
@@ -405,7 +405,7 @@ async function saveStrategy(shop, next, req, options = {}) {
   });
   rankingCache.clear();
 
-  let mirror = "vercel_private_blob";
+  let mirror = "neon_postgres";
   try {
     const installation = await gql(shop, "query{currentAppInstallation{id}}", {}, req);
     const output = await gql(
@@ -427,7 +427,7 @@ async function saveStrategy(shop, next, req, options = {}) {
     if (output.metafieldsSet.userErrors?.length) {
       throw new Error(output.metafieldsSet.userErrors.map((error) => error.message).join("; "));
     }
-    mirror = "vercel_private_blob+shopify_app_metafield";
+    mirror = "neon_postgres+shopify_app_metafield";
   } catch {}
 
   return { ...strategy, versionCount: versions.length, persistence: mirror };
@@ -741,7 +741,7 @@ async function buildContext(req, overrides = {}, shop) {
 
 app.get("/api/health", async (_req, res) => {
   let persistence = "unavailable";
-  if (process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN) persistence = "vercel_private_blob";
+  if (process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN) persistence = "neon_postgres";
   res.json({
     ok: true,
     service: "trendsplant-ordering-app",
@@ -784,7 +784,7 @@ async function persistenceMigrate(req, res) {
       strategy: { ...strategy, persistence: undefined },
       sessionMigratedAt: new Date().toISOString(),
     });
-    res.json({ ok: true, persistence: "vercel_private_blob" });
+    res.json({ ok: true, persistence: "neon_postgres" });
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
@@ -1204,7 +1204,7 @@ async function analyticsSummary(req, res) {
         ordersWebhook: state?.integrations?.ordersWebhook || { active: false },
         alerts,
       },
-      persistence: "vercel_private_blob",
+      persistence: "neon_postgres",
     });
   } catch (error) {
     res.status(502).json({ error: error.message });

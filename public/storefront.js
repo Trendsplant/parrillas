@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var INTEGRATION_VERSION = "scroll-safe-v1";
+  var INTEGRATION_VERSION = "scroll-safe-v2";
   var script = document.currentScript || document.querySelector('script[src*="parrillas-flame.vercel.app/storefront.js"]');
   var cfg = window.TrendsplantOrdering || {};
   var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
@@ -105,7 +105,11 @@
     if (rankingData) return Promise.resolve(rankingData);
     if (rankingPromise) return rankingPromise;
 
-    rankingPromise = fetch(api("/api/storefront-ranking") + "&handle=" + encodeURIComponent(handle))
+    var rankingUrl = api("/api/storefront-ranking") +
+      "&handle=" + encodeURIComponent(handle) +
+      "&_tp_rank=" + Date.now();
+
+    rankingPromise = fetch(rankingUrl, { cache: "no-store" })
       .then(function (response) {
         if (!response.ok) throw new Error("Ranking API " + response.status);
         return response.json();
@@ -218,7 +222,7 @@
     if (!button) return;
     var form = button.closest('form[action*="/cart/add"]');
     var label = String(button.getAttribute("aria-label") || button.textContent || "").trim();
-    if (!form && !/añadir|add(?:\s+to)?\s+cart/i.test(label)) return;
+    if (!form && !/aÃ±adir|add(?:\s+to)?\s+cart/i.test(label)) return;
     var product = form && form.querySelector('[name="product-id"],[name="id"]');
     sendAddToCart(product && product.value);
   }, true);
@@ -264,3 +268,4 @@
   // This script only ranks a fixed batch of product cards after the theme
   // announces that it has finished appending that batch.
 })();
+

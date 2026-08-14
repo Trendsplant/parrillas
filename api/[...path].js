@@ -111,7 +111,7 @@ let stateStorageReady = false;
 
 function database() {
   if (!DATABASE_URL) {
-    throw new Error("La base de datos Neon no está conectada.");
+    throw new Error("La base de datos Neon no estÃ¡ conectada.");
   }
   sql ||= neon(DATABASE_URL);
   return sql;
@@ -215,7 +215,7 @@ function authRequired(req, res, next) {
   ];
   if (publicPaths.includes(req.path) || sessionFrom(req)) return next();
   return res.status(401).json({
-    error: "Autenticación requerida.",
+    error: "AutenticaciÃ³n requerida.",
     loginUrl: "/api/auth/shopify?shop=" + DEFAULT_SHOP + ".myshopify.com",
   });
 }
@@ -299,7 +299,7 @@ async function gql(shop, query, variables = {}, req) {
   try {
     data = JSON.parse(raw);
   } catch {
-    throw new Error("Shopify devolvió una respuesta no válida (" + response.status + ").");
+    throw new Error("Shopify devolviÃ³ una respuesta no vÃ¡lida (" + response.status + ").");
   }
   if (!response.ok || data.errors) {
     throw new Error(data.errors?.map((error) => error.message).join("; ") || "Shopify GraphQL error");
@@ -441,7 +441,7 @@ async function collectionProducts(shop, handle, req, after = null) {
     req,
   );
   const collection = data.collectionByHandle;
-  if (!collection) throw new Error("Colección no encontrada: " + handle);
+  if (!collection) throw new Error("ColecciÃ³n no encontrada: " + handle);
   return {
     collection: { id: collection.id, title: collection.title, handle: collection.handle },
     products: collection.products.nodes.map((product) => ({
@@ -478,7 +478,7 @@ async function publicCollectionProducts(handle) {
     data = JSON.parse(raw);
   } catch {}
   if (!response.ok || !Array.isArray(data.products)) {
-    throw new Error("No se pudo cargar la colección pública (" + response.status + ").");
+    throw new Error("No se pudo cargar la colecciÃ³n pÃºblica (" + response.status + ").");
   }
   return {
     collection: { id: null, title: handle, handle },
@@ -608,192 +608,7 @@ async function recentSalesByProduct(shop, req) {
       );
       for (const order of data.orders.nodes) {
         for (const item of order.lineItems.nodes) {
-          if (item.product?.id) totals[item.product.id] = (totals[item.product.id] || 0) + item.quantity;
-        }
-      }
-      after = data.orders.pageInfo.hasNextPage ? data.orders.pageInfo.endCursor : null;
-      guard += 1;
-    } while (after && guard < 5);
-    const value = { totals, source: "shopify_orders_30d", measuredAt: new Date().toISOString() };
-    salesCache.set(shop, { value, expiresAt: Date.now() + SALES_TTL_MS });
-    return value;
-  } catch (error) {
-    return {
-      totals: {},
-      source: /access|scope|denied/i.test(String(error?.message || error))
-        ? "shopify_orders_scope_unavailable"
-        : "shopify_orders_unavailable",
-      measuredAt: new Date().toISOString(),
-    };
-  }
-}
-
-function classify(product) {
-  const text = (product.title + " " + product.productType + " " + (product.tags || []).join(" ")).toLowerCase();
-  if (/shirt|tee|linen|short|swim|cap|hat|tank|polo/.test(text)) return "light";
-  if (/hood|sweat|jacket|fleece|wool|knit|corduroy|coat|beanie/.test(text)) return "warm";
-  if (/pant|denim|trouser|chino/.test(text)) return "mid";
-  return "core";
-}
-
-function temperatureScore(type, temperature) {
-  if (temperature >= 27) return type === "light" ? 100 : type === "core" ? 65 : type === "mid" ? 55 : 25;
-  if (temperature >= 20) return type === "light" ? 88 : type === "core" ? 80 : type === "mid" ? 72 : 55;
-  if (temperature <= 10) return type === "warm" ? 100 : type === "mid" ? 72 : type === "core" ? 55 : 25;
-  if (temperature <= 16) return type === "warm" ? 90 : type === "mid" ? 82 : type === "core" ? 70 : 50;
-  return type === "mid" || type === "core" ? 82 : 72;
-}
-
-function newnessScore(product) {
-  const date = new Date(product.publishedAt || product.createdAt || 0).getTime();
-  if (!date) return 50;
-  const days = (Date.now() - date) / 86400000;
-  if (days <= 14) return 100;
-  if (days <= 30) return 88;
-  if (days <= 90) return 68;
-  if (days <= 180) return 52;
-  return 35;
-}
-
-function countryScore(product, country) {
-  const tags = (product.tags || []).join(" ").toUpperCase();
-  if (new RegExp("(^|[^A-Z])" + country + "([^A-Z]|$)").test(tags)) return 100;
-  if (country === "ES" && /SPAIN|ESPAÑA|LOCAL|ALICANTE/.test(tags)) return 95;
-  if (/GLOBAL|WORLDWIDE|EUROPE|EU/.test(tags)) return 75;
-  return 58;
-}
-
-function rankProducts(products, context, strategy) {
-  const weights = strategy.weights;
-  const salesTotals = context.sales?.totals || {};
-  const maxSales = Math.max(0, ...Object.values(salesTotals));
-  const temperature = Number(context.weather?.temperatureC ?? context.temperatureC ?? 22);
-
-  return products
-    .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale)
-    .map((product) => {
-      const type = classify(product);
-      const thermal = temperatureScore(type, temperature);
-      const affinity = countryScore(product, context.geo?.country || context.country || "ES");
-      const availability = product.availableForSale ? 100 : 0;
-      const newness = newnessScore(product);
-      const salesUnits = Number(salesTotals[product.id] || 0);
-      const recentSales = maxSales
-        ? Math.round(40 + (60 * Math.log1p(salesUnits)) / Math.log1p(maxSales))
-        : 50;
-      const score = Math.round(
-        (thermal * weights.temperatureFit +
-          affinity * weights.countryAffinity +
-          recentSales * weights.recentSales +
-          newness * weights.newness +
-          availability * weights.availability) /
-          100,
-      );
-      const reasons = [
-        thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad térmica media",
-        affinity >= 85 ? "Afinidad geográfica" : "Distribución global",
-        salesUnits > 0 ? salesUnits + " uds. vendidas en 30 días" : "Sin ventas recientes registradas",
-        newness >= 85 ? "Novedad" : "Producto consolidado",
-        availability ? "Disponible" : "Sin stock",
-      ];
-      return {
-        ...product,
-        type,
-        score,
-        signals: { thermal, affinity, recentSales, newness, availability, salesUnits },
-        reasons,
-      };
-    })
-    .sort((a, b) => b.score - a.score || (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0));
-}
-
-function publicProductRanking(product) {
-  const salesBand = product.signals.recentSales >= 80
-    ? "Demanda reciente alta"
-    : product.signals.recentSales >= 60
-      ? "Demanda reciente media"
-      : "Demanda reciente baja";
-  return {
-    id: product.id,
-    handle: product.handle,
-    title: product.title,
-    score: product.score,
-    reasons: [product.reasons[0], product.reasons[1], salesBand, product.reasons[3], product.reasons[4]],
-    signals: {
-      thermal: product.signals.thermal,
-      affinity: product.signals.affinity,
-      recentSales: product.signals.recentSales,
-      newness: product.signals.newness,
-      availability: product.signals.availability,
-    },
-    availableForSale: product.availableForSale,
-  };
-}
-
-async function buildContext(req, overrides = {}, shop) {
-  const geo = geoFromRequest(req, overrides);
-  const [weather, sales] = await Promise.all([
-    weatherFor(geo, overrides.temperatureC),
-    shop ? recentSalesByProduct(shop, req) : Promise.resolve({ totals: {}, source: "not_requested" }),
-  ]);
-  return { geo, weather, sales, generatedAt: new Date().toISOString() };
-}
-
-app.get("/api/health", async (_req, res) => {
-  let persistence = "unavailable";
-  if (process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN) persistence = "neon_postgres";
-  res.json({
-    ok: true,
-    service: "trendsplant-ordering-app",
-    phase: "storefront-control-observability",
-    persistence,
-    signals: ["geo_ip", "temperature", "recent_sales", "newness", "availability"],
-    capabilities: ["strategy_versions", "rollback", "analytics_dimensions", "orders_webhook", "rate_limits", "ranking_cache"],
-  });
-});
-
-async function persistenceStatus(req, res) {
-  try {
-    const shop = shopOf(req);
-    const state = await readState(shop);
-    res.json({
-      connected: Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN),
-      persisted: Boolean(state),
-      hasToken: Boolean(state?.accessToken),
-      hasStrategy: Boolean(state?.strategy),
-      version: state?.version || null,
-      updatedAt: state?.updatedAt || null,
-    });
-  } catch (error) {
-    res.status(502).json({ error: error.message });
-  }
-}
-
-app.get("/api/persistence/status", persistenceStatus);
-app.get("/api/persistence-status", persistenceStatus);
-
-async function persistenceMigrate(req, res) {
-  try {
-    const shop = shopOf(req);
-    const session = sessionFrom(req);
-    if (!session?.accessToken) return res.status(409).json({ error: "La sesión no contiene un token migrable." });
-    const strategy = await loadStrategy(shop, req);
-    await writeState(shop, {
-      accessToken: session.accessToken,
-      accessTokenExpiresAt: Date.now() + 10 * 365 * 24 * 60 * 60 * 1000,
-      strategy: { ...strategy, persistence: undefined },
-      sessionMigratedAt: new Date().toISOString(),
-    });
-    res.json({ ok: true, persistence: "neon_postgres" });
-  } catch (error) {
-    res.status(502).json({ error: error.message });
-  }
-}
-
-app.post("/api/persistence/migrate", persistenceMigrate);
-app.post("/api/persistence-migrate", persistenceMigrate);
-
-app.get("/api/visitor-context", async (req, res) => {
+          if (item.product?.id) totals[item.prod…1824 tokens truncated…nc (req, res) => {
   const context = await buildContext(req, req.query || {}, null);
   res.json({ geo: context.geo, weather: context.weather, generatedAt: context.generatedAt });
 });
@@ -842,7 +657,7 @@ async function rollbackStrategy(req, res) {
     const target = requestedId
       ? versions.find((version) => version.id === requestedId)
       : versions.find((version) => version.published && version.id !== currentId);
-    if (!target?.strategy) return res.status(404).json({ error: "No hay una versión anterior disponible." });
+    if (!target?.strategy) return res.status(404).json({ error: "No hay una versiÃ³n anterior disponible." });
     const restored = {
       ...target.strategy,
       audit: {
@@ -916,7 +731,7 @@ async function applyStrategy(req, res) {
     const strategy = await loadStrategy(shop, req);
     if (strategy.mode !== "live") {
       return res.status(409).json({
-        error: "La estrategia está en modo simulación. Cambia a live antes de aplicar.",
+        error: "La estrategia estÃ¡ en modo simulaciÃ³n. Cambia a live antes de aplicar.",
       });
     }
     const saved = await saveStrategy(shop, strategy, req, {
@@ -972,7 +787,7 @@ app.get("/auth/callback", async (req, res) => {
   );
   const shop = shopOf(req);
   if (!saved || saved.state !== req.query.state || saved.shop !== shop) {
-    return res.status(400).send("Estado OAuth inválido.");
+    return res.status(400).send("Estado OAuth invÃ¡lido.");
   }
   try {
     const response = await fetch("https://" + shop + ".myshopify.com/admin/oauth/access_token", {
@@ -986,7 +801,7 @@ app.get("/auth/callback", async (req, res) => {
     });
     const data = await response.json();
     if (!response.ok || !data.access_token) {
-      return res.status(502).send("No se pudo completar el inicio de sesión.");
+      return res.status(502).send("No se pudo completar el inicio de sesiÃ³n.");
     }
     const expiresAt = data.expires_in
       ? Date.now() + Math.max(60, data.expires_in - 300) * 1000
@@ -1054,10 +869,10 @@ async function writeAnalytics(shop, analytics) {
 
 function temperatureBand(value) {
   const temperature = Number(value);
-  if (temperature <= 12) return "frío ≤12°C";
-  if (temperature <= 22) return "templado 13–22°C";
-  if (temperature <= 29) return "cálido 23–29°C";
-  return "calor ≥30°C";
+  if (temperature <= 12) return "frÃ­o â‰¤12Â°C";
+  if (temperature <= 22) return "templado 13â€“22Â°C";
+  if (temperature <= 29) return "cÃ¡lido 23â€“29Â°C";
+  return "calor â‰¥30Â°C";
 }
 
 function eventAllowed(req, shop) {
@@ -1111,7 +926,7 @@ async function recordAnalytics(shop, payload, context) {
     addDimension(
       analytics.dimensions,
       "collections",
-      payload.collectionHandle || "sin atribución",
+      payload.collectionHandle || "sin atribuciÃ³n",
       metric,
       count,
       revenue,
@@ -1138,9 +953,9 @@ async function analyticsEvent(req, res) {
     const shop = shopOf(req);
     const event = String(req.body?.event || "");
     if (!["impression", "impression_batch", "click", "add_to_cart", "session"].includes(event)) {
-      return res.status(400).json({ error: "Evento no válido." });
+      return res.status(400).json({ error: "Evento no vÃ¡lido." });
     }
-    if (!eventAllowed(req, shop)) return res.status(429).json({ error: "Límite de eventos alcanzado." });
+    if (!eventAllowed(req, shop)) return res.status(429).json({ error: "LÃ­mite de eventos alcanzado." });
     const geo = geoFromRequest(req);
     const weather = await weatherFor(geo);
     await recordAnalytics(shop, req.body || {}, {
@@ -1166,12 +981,12 @@ async function analyticsSummary(req, res) {
     const rows = (group) => Object.entries(group || {}).map(([key, value]) => ({ key, ...value }));
     const persistentErrors = analytics.operational.invalidEvents || 0;
     const alerts = [];
-    if (!analytics.lastEventAt) alerts.push({ level: "info", message: "Aún no se han recibido eventos del storefront." });
+    if (!analytics.lastEventAt) alerts.push({ level: "info", message: "AÃºn no se han recibido eventos del storefront." });
     else if (Date.now() - Date.parse(analytics.lastEventAt) > 24 * 60 * 60 * 1000) {
-      alerts.push({ level: "warning", message: "No hay eventos nuevos desde hace más de 24 horas." });
+      alerts.push({ level: "warning", message: "No hay eventos nuevos desde hace mÃ¡s de 24 horas." });
     }
     if (!state?.integrations?.ordersWebhook?.active) {
-      alerts.push({ level: "warning", message: "El webhook de compras todavía no está activo." });
+      alerts.push({ level: "warning", message: "El webhook de compras todavÃ­a no estÃ¡ activo." });
     }
     if (persistentErrors + runtimeMetrics.errors > 0) {
       alerts.push({ level: "warning", message: "Se han detectado errores operativos; revisa los logs de Vercel." });
@@ -1226,7 +1041,7 @@ function validWebhookHmac(req) {
 }
 
 async function ordersCreateWebhook(req, res) {
-  if (!validWebhookHmac(req)) return res.status(401).json({ error: "Firma de webhook no válida." });
+  if (!validWebhookHmac(req)) return res.status(401).json({ error: "Firma de webhook no vÃ¡lida." });
   try {
     const headerShop = String(req.headers["x-shopify-shop-domain"] || "");
     const shop = headerShop.replace(/\.myshopify\.com$/i, "") || DEFAULT_SHOP;
@@ -1242,7 +1057,7 @@ async function ordersCreateWebhook(req, res) {
       {
         event: "purchase",
         revenue: Number(order.current_total_price || order.total_price || 0),
-        collectionHandle: noteAttributes._tp_collection || noteAttributes.tp_collection || "sin atribución",
+        collectionHandle: noteAttributes._tp_collection || noteAttributes.tp_collection || "sin atribuciÃ³n",
       },
       { country, temperatureBand: "compra confirmada" },
     );
@@ -1316,7 +1131,7 @@ app.get("/api/storefront-ranking", async (req, res) => {
     const cached = rankingCache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt) {
       runtimeMetrics.cache.rankingHits += 1;
-      res.setHeader("Cache-Control", "public, s-maxage=30, stale-while-revalidate=120");
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
       res.setHeader("X-Trendsplant-Cache", "HIT");
       return res.json(cached.value);
     }
@@ -1348,7 +1163,7 @@ app.get("/api/storefront-ranking", async (req, res) => {
       persistence: strategy.persistence,
     };
     rankingCache.set(cacheKey, { value: payload, expiresAt: Date.now() + RANKING_TTL_MS });
-    res.setHeader("Cache-Control", "public, s-maxage=30, stale-while-revalidate=120");
+    res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader("X-Trendsplant-Cache", "MISS");
     res.json(payload);
   } catch (error) {
@@ -1357,4 +1172,5 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
+
 

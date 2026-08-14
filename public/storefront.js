@@ -105,11 +105,7 @@
     if (rankingData) return Promise.resolve(rankingData);
     if (rankingPromise) return rankingPromise;
 
-    var rankingUrl = api("/api/storefront-ranking") +
-      "&handle=" + encodeURIComponent(handle) +
-      "&_tp_rank=" + Date.now();
-
-    rankingPromise = fetch(rankingUrl, { cache: "no-store" })
+    var rankingUrl = api("/api/storefront-ranking") +\n      "&handle=" + encodeURIComponent(handle) +\n      "&_tp_rank=" + Date.now();\n\n    rankingPromise = fetch(rankingUrl, { cache: "no-store" })
       .then(function (response) {
         if (!response.ok) throw new Error("Ranking API " + response.status);
         return response.json();
@@ -222,7 +218,7 @@
     if (!button) return;
     var form = button.closest('form[action*="/cart/add"]');
     var label = String(button.getAttribute("aria-label") || button.textContent || "").trim();
-    if (!form && !/aÃ±adir|add(?:\s+to)?\s+cart/i.test(label)) return;
+    if (!form && !/añadir|add(?:\s+to)?\s+cart/i.test(label)) return;
     var product = form && form.querySelector('[name="product-id"],[name="id"]');
     sendAddToCart(product && product.value);
   }, true);
@@ -268,4 +264,3 @@
   // This script only ranks a fixed batch of product cards after the theme
   // announces that it has finished appending that batch.
 })();
-

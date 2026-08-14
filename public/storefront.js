@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var INTEGRATION_VERSION = "scroll-safe-v3";
+  var INTEGRATION_VERSION = "scroll-safe-v4";
   var script = document.currentScript || document.querySelector('script[src*="parrillas-flame.vercel.app/storefront.js"]');
   var cfg = window.TrendsplantOrdering || {};
   var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
@@ -16,7 +16,11 @@
   var lastAddToCartAt = 0;
   var lastImpressionKey = "";
   var gridObserver = null;
+  var gridRootObserver = null;
   var targetEnabled = null;
+  var initialRankingTimer = null;
+  var retryTimer = null;
+  var retryCount = 0;
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
   document.body.dataset.trendsplantOrderingIntegration = INTEGRATION_VERSION;
@@ -45,7 +49,10 @@
         temperatureC: rankingContext.temperatureC
       }),
       keepalive: true
-    }).catch(function () {});
+    }).catch(function () {
+    rankingData = null;
+    scheduleRetry(0, grid ? grid.children.length : 0);
+  });
   }
 
   function sendAddToCart(productId) {
@@ -101,6 +108,58 @@
     });
     gridObserver.observe(grid, { childList: true });
     return grid;
+  }
+
+  function waitForStableGrid() {
+    return new Promise(function (resolve) {
+      var previousSignature = "";
+      var stableChecks = 0;
+      var checks = 0;
+
+      function check() {
+        var currentGrid = observeGrid();
+        if (!currentGrid) return resolve(null);
+        var cards = Array.from(currentGrid.children);
+        var signature = cards.length + ":" + cards.slice(0, 6).map(cardHandle).join(",");
+        stableChecks = signature === previousSignature ? stableChecks + 1 : 0;
+        previousSignature = signature;
+        checks += 1;
+        if (stableChecks >= 1 || checks >= 12) return resolve(currentGrid);
+        window.setTimeout(check, 100);
+      }
+
+      check();
+    });
+  }
+
+  function scheduleRetry(startIndex, addedCount) {
+    if (targetEnabled === false || retryCount >= 3) {
+      if (targetEnabled !== false) document.body.dataset.trendsplantRankingMode = "unavailable";
+      return;
+    }
+    var delays = [700, 1600, 3200];
+    var delay = delays[retryCount] || 3200;
+    retryCount += 1;
+    window.clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(function () {
+      rankWhenStable(startIndex, addedCount);
+    }, delay);
+  }
+
+  function rankWhenStable(startIndex, addedCount) {
+    if (targetEnabled === false) return;
+    waitForStableGrid()
+      .then(function (currentGrid) {
+        if (!currentGrid || targetEnabled === false) return;
+        return reorderBatch(startIndex, addedCount);
+      })
+      .then(function () {
+        retryCount = 0;
+      })
+      .catch(function () {
+        rankingData = null;
+        scheduleRetry(startIndex, addedCount);
+      });
   }
 
   function fetchRanking() {
@@ -175,6 +234,7 @@
 
     return fetchRanking().then(function (data) {
       if (data.target === false || !data.enabled || !Array.isArray(data.products)) return;
+      if (currentGrid !== document.querySelector(gridSelector)) return;
 
       sendImpressions(cards, data);
       if (data.mode !== "live") return;
@@ -233,13 +293,25 @@
 
   function scheduleInitialRanking() {
     var currentGrid = observeGrid();
-    if (!currentGrid) return;
+    if (!currentGrid || targetEnabled === false) return;
 
     wireCards();
-    window.clearTimeout(reorderTimer);
-    reorderTimer = window.setTimeout(function () {
-      reorderBatch(0, currentGrid.children.length);
-    }, 120);
+    window.clearTimeout(initialRankingTimer);
+    initialRankingTimer = window.setTimeout(function () {
+      var latestGrid = observeGrid();
+      rankWhenStable(0, latestGrid ? latestGrid.children.length : 0);
+    }, 180);
+  }
+
+  function watchForGridReplacement() {
+    if (gridRootObserver || !document.body) return;
+    gridRootObserver = new MutationObserver(function () {
+      var currentGrid = document.querySelector(gridSelector);
+      if (!currentGrid || currentGrid === grid || targetEnabled === false) return;
+      observeGrid();
+      scheduleInitialRanking();
+    });
+    gridRootObserver.observe(document.body, { childList: true, subtree: true });
   }
 
   document.addEventListener("tp:infinite-scroll:loaded", function (event) {
@@ -247,8 +319,8 @@
     wireCards();
 
     window.setTimeout(function () {
-      reorderBatch(detail.startIndex, detail.addedCount);
-    }, 120);
+      rankWhenStable(detail.startIndex, detail.addedCount);
+    }, 160);
   });
 
   ["globoFilterRenderSearchCompleted", "globoFilterRenderCollectionCompleted"].forEach(function (eventName) {
@@ -265,6 +337,7 @@
   });
 
   observeGrid();
+  watchForGridReplacement();
   fetchRanking().then(function (data) {
     if (data.target === false || !data.enabled) {
       document.body.dataset.trendsplantOrdering = "inactive";

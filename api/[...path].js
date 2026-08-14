@@ -1421,6 +1421,18 @@ app.get("/api/storefront-ranking", async (req, res) => {
     const shop = shopOf(req);
     const strategy = await loadPublishedStrategy(shop, req);
     const handle = String(req.query?.handle || collectionHandlesFor(strategy)[0] || "men");
+    const targetCollections = collectionHandlesFor(strategy);
+    if (!targetCollections.includes(handle)) {
+      res.setHeader("Cache-Control", "private, no-store, max-age=0");
+      return res.json({
+        enabled: false,
+        target: false,
+        mode: strategy.mode,
+        strategyVersion: strategy.audit?.versionId || null,
+        collection: { handle },
+        products: [],
+      });
+    }
     const context = await buildContext(req, req.query || {}, shop);
     const cacheKey = [
       shop,

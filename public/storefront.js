@@ -1,22 +1,24 @@
 (function () {
   "use strict";
 
+  var INTEGRATION_VERSION = "scroll-safe-v1";
   var script = document.currentScript || document.querySelector('script[src*="parrillas-flame.vercel.app/storefront.js"]');
   var cfg = window.TrendsplantOrdering || {};
   var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
   var shop = (window.Shopify && window.Shopify.shop) || location.hostname;
   var gridSelector = cfg.gridSelector || "#AjaxinateLoop,[data-product-grid],#product-grid,.product-grid,.collection .grid";
-  var nextSelector = cfg.nextSelector || "#AjaxinatePagination a,a[rel='next'],.pagination a.next";
   var grid = document.querySelector(gridSelector);
-  var loading = false;
   var reorderTimer = null;
   var sessionId = "tp-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var rankingContext = { country: null, temperatureC: null };
+  var rankingData = null;
+  var rankingPromise = null;
   var lastAddToCartAt = 0;
   var lastImpressionKey = "";
   var gridObserver = null;
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
+  document.body.dataset.trendsplantOrderingIntegration = INTEGRATION_VERSION;
   if (document.body.dataset.trendsplantOrderingBound === "1") return;
   document.body.dataset.trendsplantOrderingBound = "1";
 
@@ -80,67 +82,121 @@
     return match && match[1];
   }
 
-  function reorder() {
-    if (!grid) return Promise.resolve();
-    return fetch(api("/api/storefront-ranking") + "&handle=" + encodeURIComponent(handle))
+  function observeGrid() {
+    var current = document.querySelector(gridSelector);
+    if (current === grid && gridObserver) return grid;
+
+    if (gridObserver) gridObserver.disconnect();
+    grid = current;
+
+    document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
+    if (!grid) return null;
+
+    gridObserver = new MutationObserver(function (mutations) {
+      if (mutations.some(function (mutation) { return mutation.addedNodes.length > 0; })) {
+        wireCards();
+      }
+    });
+    gridObserver.observe(grid, { childList: true });
+    return grid;
+  }
+
+  function fetchRanking() {
+    if (rankingData) return Promise.resolve(rankingData);
+    if (rankingPromise) return rankingPromise;
+
+    rankingPromise = fetch(api("/api/storefront-ranking") + "&handle=" + encodeURIComponent(handle))
       .then(function (response) {
         if (!response.ok) throw new Error("Ranking API " + response.status);
         return response.json();
       })
       .then(function (data) {
+        rankingData = data;
         rankingContext.country = data.context && data.context.country;
         rankingContext.temperatureC = data.context && data.context.temperatureC;
         document.body.dataset.trendsplantRankingMode = data.mode || "simulation";
         document.body.dataset.trendsplantStrategyVersion = data.strategyVersion || "none";
-        if (!data.enabled || !Array.isArray(data.products)) return;
-
-        var visibleIds = data.products.slice(0, grid.children.length).map(function (product) {
-          return product.id;
-        });
-        var impressionKey = visibleIds.join(",");
-        if (visibleIds.length && impressionKey !== lastImpressionKey) {
-          lastImpressionKey = impressionKey;
-          fetch(api("/api/analytics-events"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
-            body: JSON.stringify({
-              shop: shop,
-              event: "impression_batch",
-              productIds: visibleIds,
-              collectionHandle: handle,
-              sessionId: sessionId
-            }),
-            keepalive: true
-          }).catch(function () {});
-        }
-
-        if (data.mode !== "live") return;
-
-        var order = new Map(data.products.map(function (product, index) {
-          return [product.handle, index];
-        }));
-
-        if (gridObserver) gridObserver.disconnect();
-        Array.from(grid.children)
-          .sort(function (a, b) {
-            var ah = cardHandle(a);
-            var bh = cardHandle(b);
-            var ai = order.has(ah) ? order.get(ah) : 999999;
-            var bi = order.has(bh) ? order.get(bh) : 999999;
-            return ai - bi;
-          })
-          .forEach(function (card) { grid.appendChild(card); });
-        if (gridObserver) gridObserver.observe(grid, { childList: true });
-
+        return data;
       })
-      .catch(function () {
+      .catch(function (error) {
         document.body.dataset.trendsplantRankingMode = "unavailable";
+        throw error;
+      })
+      .finally(function () {
+        rankingPromise = null;
       });
+
+    return rankingPromise;
+  }
+
+  function sendImpressions(cards, data) {
+    var productsByHandle = new Map(data.products.map(function (product) {
+      return [product.handle, product.id];
+    }));
+    var visibleIds = cards.map(cardHandle).map(function (productHandle) {
+      return productsByHandle.get(productHandle);
+    }).filter(Boolean);
+    var impressionKey = visibleIds.join(",");
+
+    if (!visibleIds.length || impressionKey === lastImpressionKey) return;
+    lastImpressionKey = impressionKey;
+
+    fetch(api("/api/analytics-events"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
+      body: JSON.stringify({
+        shop: shop,
+        event: "impression_batch",
+        productIds: visibleIds,
+        collectionHandle: handle,
+        sessionId: sessionId
+      }),
+      keepalive: true
+    }).catch(function () {});
+  }
+
+  function reorderBatch(startIndex, addedCount) {
+    var currentGrid = observeGrid();
+    if (!currentGrid) return Promise.resolve();
+
+    var allCards = Array.from(currentGrid.children);
+    var start = Math.max(0, Number(startIndex) || 0);
+    var count = Math.max(0, Number(addedCount) || (allCards.length - start));
+    var cards = allCards.slice(start, start + count);
+    if (!cards.length) return Promise.resolve();
+
+    return fetchRanking().then(function (data) {
+      if (!data.enabled || !Array.isArray(data.products)) return;
+
+      sendImpressions(cards, data);
+      if (data.mode !== "live") return;
+
+      var order = new Map(data.products.map(function (product, index) {
+        return [product.handle, index];
+      }));
+      var originalPosition = new Map(cards.map(function (card, index) {
+        return [card, index];
+      }));
+
+      if (gridObserver) gridObserver.disconnect();
+      cards.sort(function (a, b) {
+        var ah = cardHandle(a);
+        var bh = cardHandle(b);
+        var ai = order.has(ah) ? order.get(ah) : 999999;
+        var bi = order.has(bh) ? order.get(bh) : 999999;
+        return ai === bi ? originalPosition.get(a) - originalPosition.get(b) : ai - bi;
+      }).forEach(function (card) {
+        currentGrid.appendChild(card);
+      });
+      if (gridObserver) gridObserver.observe(currentGrid, { childList: true });
+    }).catch(function () {});
   }
 
   function wireCards() {
-    if (!grid) return;
-    Array.from(grid.querySelectorAll('a[href*="/products/"]')).forEach(function (link) {
+    var currentGrid = observeGrid();
+    if (!currentGrid) return;
+
+    Array.from(currentGrid.querySelectorAll('a[href*="/products/"]')).forEach(function (link) {
       if (link.dataset.tpWired) return;
       link.dataset.tpWired = "1";
       link.addEventListener("click", function () {
@@ -167,55 +223,44 @@
     sendAddToCart(product && product.value);
   }, true);
 
-  function scheduleRefresh() {
-    if (!grid) return;
+  function scheduleInitialRanking() {
+    var currentGrid = observeGrid();
+    if (!currentGrid) return;
+
     wireCards();
-    clearTimeout(reorderTimer);
-    reorderTimer = setTimeout(reorder, 120);
+    window.clearTimeout(reorderTimer);
+    reorderTimer = window.setTimeout(function () {
+      reorderBatch(0, currentGrid.children.length);
+    }, 120);
   }
 
-  function nextPage() {
-    var next = document.querySelector(nextSelector);
-    if (!next || loading) return;
-    loading = true;
+  document.addEventListener("tp:infinite-scroll:loaded", function (event) {
+    var detail = event.detail || {};
+    wireCards();
 
-    fetch(next.href)
-      .then(function (response) { return response.text(); })
-      .then(function (html) {
-        var doc = new DOMParser().parseFromString(html, "text/html");
-        var nextGrid = doc.querySelector(gridSelector);
-        if (!nextGrid) return;
+    window.setTimeout(function () {
+      reorderBatch(detail.startIndex, detail.addedCount);
+    }, 120);
+  });
 
-        Array.from(nextGrid.children).forEach(function (card) { grid.appendChild(card); });
-        var newNext = doc.querySelector(nextSelector);
-        if (newNext) next.setAttribute("href", newNext.href);
-        else {
-          var pagination = next.closest("#AjaxinatePagination,.pagination");
-          if (pagination) pagination.remove();
-          else next.remove();
-        }
-        scheduleRefresh();
-      })
-      .catch(function () {})
-      .finally(function () { loading = false; });
-  }
-
-  if (grid) {
-    // Ajaxinate owns the infinite-scroll lifecycle. Reordering while it is
-    // appending a page can leave its loader waiting, so only wire analytics
-    // for subsequently added cards; the initial block is ranked on load.
-    gridObserver = new MutationObserver(function (mutations) {
-      if (mutations.some(function (mutation) { return mutation.addedNodes.length > 0; })) {
-        wireCards();
-      }
+  ["globoFilterRenderSearchCompleted", "globoFilterRenderCollectionCompleted"].forEach(function (eventName) {
+    window.addEventListener(eventName, function () {
+      rankingData = null;
+      observeGrid();
+      scheduleInitialRanking();
     });
-    gridObserver.observe(grid, { childList: true });
-  }
+  });
 
+  document.addEventListener("shopify:section:load", function () {
+    observeGrid();
+    scheduleInitialRanking();
+  });
+
+  observeGrid();
   send("session");
-  scheduleRefresh();
+  scheduleInitialRanking();
 
-  // Pagination and infinite scrolling are entirely owned by the theme's
-  // Ajaxinate instance. This app only reads and ranks the products already
-  // present in the grid.
+  // Infinite scrolling and pagination belong exclusively to the Shopify theme.
+  // This script only ranks a fixed batch of product cards after the theme
+  // announces that it has finished appending that batch.
 })();

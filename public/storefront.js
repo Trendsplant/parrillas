@@ -215,15 +215,7 @@
   send("session");
   scheduleRefresh();
 
-  var nativeInfinite = document.querySelector("#AjaxinatePagination.pagination--infinite");
-  if (grid && !nativeInfinite) {
-    var sentinel = document.createElement("div");
-    sentinel.setAttribute("aria-hidden", "true");
-    sentinel.dataset.trendsplantSentinel = "true";
-    sentinel.style.height = "1px";
-    grid.parentNode.appendChild(sentinel);
-    new IntersectionObserver(function (entries) {
-      if (entries.some(function (entry) { return entry.isIntersecting; })) nextPage();
-    }, { rootMargin: "700px" }).observe(sentinel);
-  }
+  // Pagination and infinite scrolling are entirely owned by the theme's
+  // Ajaxinate instance. This app only reads and ranks the products already
+  // present in the grid.
 })();

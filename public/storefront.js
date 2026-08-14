@@ -49,10 +49,7 @@
         temperatureC: rankingContext.temperatureC
       }),
       keepalive: true
-    }).catch(function () {
-    rankingData = null;
-    scheduleRetry(0, grid ? grid.children.length : 0);
-  });
+    }).catch(function () {});
   }
 
   function sendAddToCart(productId) {
@@ -257,7 +254,9 @@
         currentGrid.appendChild(card);
       });
       if (gridObserver) gridObserver.observe(currentGrid, { childList: true });
-    }).catch(function () {});
+    }).catch(function (error) {
+      throw error;
+    });
   }
 
   function wireCards() {
@@ -346,7 +345,10 @@
     targetEnabled = true;
     send("session");
     scheduleInitialRanking();
-  }).catch(function () {});
+  }).catch(function () {
+    rankingData = null;
+    scheduleRetry(0, grid ? grid.children.length : 0);
+  });
 
   // Infinite scrolling and pagination belong exclusively to the Shopify theme.
   // This script only ranks a fixed batch of product cards after the theme

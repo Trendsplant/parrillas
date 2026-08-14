@@ -24,6 +24,7 @@ const DEFAULT_STRATEGY = {
   enabled: true,
   mode: "simulation",
   collectionHandle: "men",
+  collectionHandles: ["men"],
   fallback: "original",
   weights: {
     temperatureFit: 30,
@@ -166,6 +167,22 @@ function shopOf(req) {
   return raw.endsWith(".myshopify.com")
     ? raw.replace(/\.myshopify\.com$/, "")
     : DEFAULT_SHOP;
+}
+
+function collectionHandlesFor(strategy = {}) {
+  const raw = Array.isArray(strategy.collectionHandles)
+    ? strategy.collectionHandles
+    : String(strategy.collectionHandles || strategy.collectionHandle || "").split(",");
+  const handles = raw
+    .map((handle) => String(handle || "").trim().toLowerCase())
+    .filter((handle) => /^[a-z0-9][a-z0-9-]*$/.test(handle));
+  const unique = [...new Set(handles)].slice(0, 4);
+  return unique.length ? unique : ["men"];
+}
+
+function normalizeStrategyCollections(strategy = {}) {
+  const collectionHandles = collectionHandlesFor(strategy);
+  return { ...strategy, collectionHandles, collectionHandle: collectionHandles[0] };
 }
 
 function normalizeWeights(weights = {}) {
@@ -312,7 +329,7 @@ async function loadStrategy(shop, req) {
   if (state?.strategy) {
     memoryStrategy = {
       ...structuredClone(DEFAULT_STRATEGY),
-      ...state.strategy,
+      ...normalizeStrategyCollections(state.strategy),
       weights: normalizeWeights(state.strategy.weights),
     };
     return {
@@ -334,7 +351,7 @@ async function loadStrategy(shop, req) {
       const parsed = JSON.parse(value);
       memoryStrategy = {
         ...structuredClone(DEFAULT_STRATEGY),
-        ...parsed,
+        ...normalizeStrategyCollections(parsed),
         weights: normalizeWeights(parsed.weights),
       };
       await writeState(shop, { strategy: memoryStrategy }).catch(() => {});
@@ -355,7 +372,7 @@ async function loadPublishedStrategy(shop, req) {
   if (state?.publishedStrategy) {
     return {
       ...structuredClone(DEFAULT_STRATEGY),
-      ...state.publishedStrategy,
+      ...normalizeStrategyCollections(state.publishedStrategy),
       weights: normalizeWeights(state.publishedStrategy.weights),
       persistence: "neon_postgres",
     };
@@ -371,7 +388,7 @@ async function saveStrategy(shop, next, req, options = {}) {
   const versionId = "v" + revision + "-" + Date.now().toString(36);
   const strategy = {
     ...structuredClone(DEFAULT_STRATEGY),
-    ...strategySnapshot(next),
+    ...normalizeStrategyCollections(strategySnapshot(next)),
     weights: normalizeWeights(next.weights),
     audit: {
       ...previous.audit,
@@ -782,8 +799,8 @@ function collectionRankingMoves(currentProducts, rankedProducts, limit = 250) {
   return moves;
 }
 
-async function publishCollectionRanking(shop, strategy, req) {
-  const data = await allCollectionProducts(shop, strategy.collectionHandle || "men", req);
+async function publishCollectionRanking(shop, strategy, req, handle) {
+  const data = await allCollectionProducts(shop, handle, req);
   const context = await buildContext(req, req.body || {}, shop);
   const ranked = rankProducts(data.products, context, strategy);
   if (!data.collection?.id) throw new Error("No se pudo identificar la colección para publicar el ranking.");
@@ -801,6 +818,7 @@ async function publishCollectionRanking(shop, strategy, req) {
   if (!moves.length) {
     return {
       ok: true,
+      handle,
       status: "already_ranked",
       movedCount: 0,
       salesSource: context.sales?.source,
@@ -820,6 +838,7 @@ async function publishCollectionRanking(shop, strategy, req) {
   }
   return {
     ok: true,
+    handle,
     status: reorder.job?.done ? "complete" : "processing",
     jobId: reorder.job?.id || null,
     movedCount: moves.length,
@@ -909,6 +928,7 @@ async function strategyVersions(req, res) {
     const versions = (state?.strategyVersions || []).map(({ strategy, ...version }) => ({
       ...version,
       collectionHandle: strategy?.collectionHandle,
+      collectionHandles: collectionHandlesFor(strategy || {}),
       mode: strategy?.mode,
       weights: strategy?.weights,
     }));
@@ -974,7 +994,7 @@ async function simulate(req, res) {
     const shop = shopOf(req);
     const strategy = await loadStrategy(shop, req);
     const context = await buildContext(req, req.body || {}, shop);
-    const handle = strategy.collectionHandle || "men";
+    const handle = String(req.body?.handle || collectionHandlesFor(strategy)[0] || "men");
     let data;
     let source = "shopify_admin_graphql";
     try {
@@ -1008,7 +1028,10 @@ async function applyStrategy(req, res) {
         error: "La estrategia está en modo simulación. Cambia a live antes de aplicar.",
       });
     }
-    const collectionOrdering = await publishCollectionRanking(shop, strategy, req);
+    const collectionOrdering = [];
+    for (const handle of collectionHandlesFor(strategy)) {
+      collectionOrdering.push(await publishCollectionRanking(shop, strategy, req, handle));
+    }
     const saved = await saveStrategy(shop, strategy, req, {
       action: "apply",
       publish: true,
@@ -1022,9 +1045,9 @@ async function applyStrategy(req, res) {
     }
     res.json({
       ok: true,
-      message: collectionOrdering.status === "processing"
-        ? "Estrategia live aplicada. Shopify está terminando de ordenar la colección."
-        : "Estrategia live aplicada y colección reordenada según el ranking.",
+      message: collectionOrdering.some((item) => item.status === "processing")
+        ? "Estrategia live aplicada. Shopify está terminando de ordenar las colecciones."
+        : "Estrategia live aplicada y colecciones reordenadas según el ranking.",
       strategy: saved,
       collectionOrdering,
       webhook,
@@ -1397,7 +1420,7 @@ app.get("/api/storefront-ranking", async (req, res) => {
   try {
     const shop = shopOf(req);
     const strategy = await loadPublishedStrategy(shop, req);
-    const handle = String(req.query?.handle || strategy.collectionHandle || "men");
+    const handle = String(req.query?.handle || collectionHandlesFor(strategy)[0] || "men");
     const context = await buildContext(req, req.query || {}, shop);
     const cacheKey = [
       shop,

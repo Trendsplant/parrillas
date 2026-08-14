@@ -13,6 +13,8 @@
   var sessionId = "tp-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var rankingContext = { country: null, temperatureC: null };
   var lastAddToCartAt = 0;
+  var lastImpressionKey = "";
+  var gridObserver = null;
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
   if (document.body.dataset.trendsplantOrderingBound === "1") return;
@@ -95,7 +97,9 @@
         var visibleIds = data.products.slice(0, grid.children.length).map(function (product) {
           return product.id;
         });
-        if (visibleIds.length) {
+        var impressionKey = visibleIds.join(",");
+        if (visibleIds.length && impressionKey !== lastImpressionKey) {
+          lastImpressionKey = impressionKey;
           fetch(api("/api/analytics-events"), {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
@@ -116,6 +120,7 @@
           return [product.handle, index];
         }));
 
+        if (gridObserver) gridObserver.disconnect();
         Array.from(grid.children)
           .sort(function (a, b) {
             var ah = cardHandle(a);
@@ -125,6 +130,7 @@
             return ai - bi;
           })
           .forEach(function (card) { grid.appendChild(card); });
+        if (gridObserver) gridObserver.observe(grid, { childList: true });
 
       })
       .catch(function () {
@@ -195,11 +201,12 @@
   }
 
   if (grid) {
-    new MutationObserver(function (mutations) {
+    gridObserver = new MutationObserver(function (mutations) {
       if (mutations.some(function (mutation) { return mutation.addedNodes.length > 0; })) {
         scheduleRefresh();
       }
-    }).observe(grid, { childList: true });
+    });
+    gridObserver.observe(grid, { childList: true });
   }
 
   send("session");

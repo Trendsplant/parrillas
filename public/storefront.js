@@ -201,9 +201,12 @@
   }
 
   if (grid) {
+    // Ajaxinate owns the infinite-scroll lifecycle. Reordering while it is
+    // appending a page can leave its loader waiting, so only wire analytics
+    // for subsequently added cards; the initial block is ranked on load.
     gridObserver = new MutationObserver(function (mutations) {
       if (mutations.some(function (mutation) { return mutation.addedNodes.length > 0; })) {
-        scheduleRefresh();
+        wireCards();
       }
     });
     gridObserver.observe(grid, { childList: true });

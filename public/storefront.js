@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var INTEGRATION_VERSION = "scroll-safe-v2";
+  var INTEGRATION_VERSION = "scroll-safe-v3";
   var script = document.currentScript || document.querySelector('script[src*="parrillas-flame.vercel.app/storefront.js"]');
   var cfg = window.TrendsplantOrdering || {};
   var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
@@ -16,6 +16,7 @@
   var lastAddToCartAt = 0;
   var lastImpressionKey = "";
   var gridObserver = null;
+  var targetEnabled = null;
 
   document.body.dataset.trendsplantOrdering = grid ? "ready" : "no-grid";
   document.body.dataset.trendsplantOrderingIntegration = INTEGRATION_VERSION;
@@ -30,6 +31,7 @@
   }
 
   function send(event, productId) {
+    if (targetEnabled !== true) return Promise.resolve();
     return fetch(api("/api/analytics-events"), {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
@@ -116,6 +118,7 @@
       })
       .then(function (data) {
         rankingData = data;
+        targetEnabled = data.target === false ? false : Boolean(data.enabled);
         rankingContext.country = data.context && data.context.country;
         rankingContext.temperatureC = data.context && data.context.temperatureC;
         document.body.dataset.trendsplantRankingMode = data.mode || "simulation";
@@ -160,6 +163,7 @@
   }
 
   function reorderBatch(startIndex, addedCount) {
+    if (targetEnabled === false) return Promise.resolve();
     var currentGrid = observeGrid();
     if (!currentGrid) return Promise.resolve();
 
@@ -170,7 +174,7 @@
     if (!cards.length) return Promise.resolve();
 
     return fetchRanking().then(function (data) {
-      if (!data.enabled || !Array.isArray(data.products)) return;
+      if (data.target === false || !data.enabled || !Array.isArray(data.products)) return;
 
       sendImpressions(cards, data);
       if (data.mode !== "live") return;
@@ -261,8 +265,15 @@
   });
 
   observeGrid();
-  send("session");
-  scheduleInitialRanking();
+  fetchRanking().then(function (data) {
+    if (data.target === false || !data.enabled) {
+      document.body.dataset.trendsplantOrdering = "inactive";
+      return;
+    }
+    targetEnabled = true;
+    send("session");
+    scheduleInitialRanking();
+  }).catch(function () {});
 
   // Infinite scrolling and pagination belong exclusively to the Shopify theme.
   // This script only ranks a fixed batch of product cards after the theme

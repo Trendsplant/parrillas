@@ -596,30 +596,36 @@ async function recentSalesByProduct(shop, req) {
 
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const totals = {};
+  const totalsByCountry = {};
   let after = null;
   let guard = 0;
   try {
     do {
       const data = await gql(
         shop,
-        "query RecentSales($after:String,$query:String!){orders(first:100,after:$after,query:$query,sortKey:CREATED_AT,reverse:true){nodes{lineItems(first:100){nodes{quantity product{id}}}}pageInfo{hasNextPage endCursor}}}",
+        "query RecentSales($after:String,$query:String!){orders(first:100,after:$after,query:$query,sortKey:CREATED_AT,reverse:true){nodes{shippingAddress{countryCodeV2} lineItems(first:100){nodes{quantity product{id}}}}pageInfo{hasNextPage endCursor}}}",
         { after, query: "created_at:>=" + since },
         req,
       );
       for (const order of data.orders.nodes) {
+        const country = String(order.shippingAddress?.countryCodeV2 || "").toUpperCase();
+        if (country && !totalsByCountry[country]) totalsByCountry[country] = {};
         for (const item of order.lineItems.nodes) {
-          if (item.product?.id) totals[item.product.id] = (totals[item.product.id] || 0) + item.quantity;
+          if (!item.product?.id) continue;
+          totals[item.product.id] = (totals[item.product.id] || 0) + item.quantity;
+          if (country) totalsByCountry[country][item.product.id] = (totalsByCountry[country][item.product.id] || 0) + item.quantity;
         }
       }
       after = data.orders.pageInfo.hasNextPage ? data.orders.pageInfo.endCursor : null;
       guard += 1;
     } while (after && guard < 5);
-    const value = { totals, source: "shopify_orders_30d", measuredAt: new Date().toISOString() };
+    const value = { totals, totalsByCountry, source: "shopify_orders_30d_by_country", measuredAt: new Date().toISOString() };
     salesCache.set(shop, { value, expiresAt: Date.now() + SALES_TTL_MS });
     return value;
   } catch (error) {
     return {
       totals: {},
+      totalsByCountry: {},
       source: /access|scope|denied/i.test(String(error?.message || error))
         ? "shopify_orders_scope_unavailable"
         : "shopify_orders_unavailable",
@@ -655,7 +661,7 @@ function newnessScore(product) {
   return 35;
 }
 
-function countryScore(product, country) {
+function countryTagScore(product, country) {
   const tags = (product.tags || []).join(" ").toUpperCase();
   if (new RegExp("(^|[^A-Z])" + country + "([^A-Z]|$)").test(tags)) return 100;
   if (country === "ES" && /SPAIN|ESPAÑA|LOCAL|ALICANTE/.test(tags)) return 95;
@@ -663,24 +669,46 @@ function countryScore(product, country) {
   return 58;
 }
 
+function demandScore(units, maxUnits, fallback = 50) {
+  if (!maxUnits) return fallback;
+  return Math.round(40 + (60 * Math.log1p(units)) / Math.log1p(maxUnits));
+}
+
+function countrySalesScore(product, country, sales) {
+  const globalTotals = sales?.totals || {};
+  const localTotals = sales?.totalsByCountry?.[country] || {};
+  const globalMax = Math.max(0, ...Object.values(globalTotals));
+  const localMax = Math.max(0, ...Object.values(localTotals));
+  const localVolume = Object.values(localTotals).reduce((sum, units) => sum + Number(units || 0), 0);
+  const globalScore = demandScore(Number(globalTotals[product.id] || 0), globalMax, countryTagScore(product, country));
+  if (!localMax) return { score: globalScore, localUnits: 0, source: "global_fallback" };
+  const localScore = demandScore(Number(localTotals[product.id] || 0), localMax);
+  const confidence = Math.min(1, localVolume / 20);
+  return {
+    score: Math.round(localScore * confidence + globalScore * (1 - confidence)),
+    localUnits: Number(localTotals[product.id] || 0),
+    source: confidence >= 1 ? "country_sales" : "country_sales_blended",
+  };
+}
+
 function rankProducts(products, context, strategy) {
   const weights = strategy.weights;
   const salesTotals = context.sales?.totals || {};
   const maxSales = Math.max(0, ...Object.values(salesTotals));
   const temperature = Number(context.weather?.temperatureC ?? context.temperatureC ?? 22);
+  const country = context.geo?.country || context.country || "ES";
 
   return products
     .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale)
     .map((product) => {
       const type = classify(product);
       const thermal = temperatureScore(type, temperature);
-      const affinity = countryScore(product, context.geo?.country || context.country || "ES");
+      const countryDemand = countrySalesScore(product, country, context.sales);
+      const affinity = countryDemand.score;
       const availability = product.availableForSale ? 100 : 0;
       const newness = newnessScore(product);
       const salesUnits = Number(salesTotals[product.id] || 0);
-      const recentSales = maxSales
-        ? Math.round(40 + (60 * Math.log1p(salesUnits)) / Math.log1p(maxSales))
-        : 50;
+      const recentSales = demandScore(salesUnits, maxSales);
       const score = Math.round(
         (thermal * weights.temperatureFit +
           affinity * weights.countryAffinity +
@@ -691,7 +719,9 @@ function rankProducts(products, context, strategy) {
       );
       const reasons = [
         thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad térmica media",
-        affinity >= 85 ? "Afinidad geográfica" : "Distribución global",
+        countryDemand.localUnits > 0
+          ? countryDemand.localUnits + " uds. vendidas en " + country + " en 30 días"
+          : "Demanda global usada como respaldo para " + country,
         salesUnits > 0 ? salesUnits + " uds. vendidas en 30 días" : "Sin ventas recientes registradas",
         newness >= 85 ? "Novedad" : "Producto consolidado",
         availability ? "Disponible" : "Sin stock",
@@ -700,7 +730,7 @@ function rankProducts(products, context, strategy) {
         ...product,
         type,
         score,
-        signals: { thermal, affinity, recentSales, newness, availability, salesUnits },
+        signals: { thermal, affinity, recentSales, newness, availability, salesUnits, countrySalesUnits: countryDemand.localUnits, countrySalesSource: countryDemand.source },
         reasons,
       };
     })

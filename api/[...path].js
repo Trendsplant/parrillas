@@ -1699,7 +1699,17 @@ async function appendThemeReleaseAudit(entry) {
 
 async function themeReleaseStatusRoute(req, res) {
   try {
-    const session = assertThemeReleaseAdmin(req);
+    // Reading the status is non-mutating, so the direct private dashboard may use its
+    // encrypted shop session. Publishing remains guarded by assertThemeReleaseAdmin(),
+    // which requires a fresh, staff-specific App Bridge token from Shopify Admin.
+    const session = shopifySessionTokenFrom(req) || sessionFrom(req);
+    if (!session || session.shop !== DEFAULT_SHOP) {
+      const error = new Error("Inicia sesión para consultar la publicación del tema.");
+      error.status = 401;
+      throw error;
+    }
+    const signedSession = shopifySessionTokenFrom(req);
+    if (signedSession) assertThemeReleaseAdmin(req);
     if (!githubThemeReleaseConfigured()) {
       return res.json({
         configured: false,
@@ -1708,12 +1718,12 @@ async function themeReleaseStatusRoute(req, res) {
         targetBranch: GITHUB_THEME_TARGET_BRANCH,
         canPromote: false,
         message: "Falta configurar la credencial segura de GitHub en Vercel.",
-        authorizedUser: { id: session.userId, name: session.actor },
+        authorizedUser: { id: session.userId || null, name: signedSession?.actor || "Sesión web" },
       });
     }
     res.json({
       ...(await themeReleaseStatus(session.shop)),
-      authorizedUser: { id: session.userId, name: session.actor },
+      authorizedUser: { id: session.userId || null, name: signedSession?.actor || "Sesión web" },
     });
   } catch (error) {
     if (error.status === 401) {

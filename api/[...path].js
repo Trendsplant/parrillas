@@ -19,6 +19,14 @@ const RANKING_TTL_MS = 30 * 1000;
 const EVENT_RATE_LIMIT = 120;
 const EVENT_RATE_WINDOW_MS = 60 * 1000;
 const MAX_STRATEGY_VERSIONS = 30;
+const ADMIN_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const GITHUB_THEME_OWNER = "Trendsplant";
+const GITHUB_THEME_REPOSITORY = "tpshopify";
+const GITHUB_THEME_SOURCE_BRANCH = "preview";
+const GITHUB_THEME_TARGET_BRANCH = "main";
+const GITHUB_API_VERSION = "2022-11-28";
+const THEME_RELEASE_LOCK_TTL_SECONDS = 15 * 60;
+const THEME_RELEASE_COOLDOWN_SECONDS = 10;
 
 const DEFAULT_STRATEGY = {
   enabled: true,
@@ -43,6 +51,7 @@ const weatherCache = new Map();
 const salesCache = new Map();
 const rankingCache = new Map();
 const eventRateBuckets = new Map();
+let githubInstallationTokenCache = null;
 const runtimeMetrics = {
   startedAt: new Date().toISOString(),
   requests: 0,
@@ -109,6 +118,8 @@ function open(value) {
 const DATABASE_URL = process.env.NEON_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 let sql;
 let stateStorageReady = false;
+let themeReleaseLockStorageReady = false;
+let themeReleaseAuditStorageReady = false;
 
 function database() {
   if (!DATABASE_URL) {
@@ -157,9 +168,84 @@ function cookie(res, name, value, maxAge = 600) {
   );
 }
 
+function shopifySessionTokenFrom(req) {
+  const authorization = String(req?.headers?.authorization || "");
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  const apiKey = String(process.env.SHOPIFY_API_KEY || "");
+  const apiSecret = String(process.env.SHOPIFY_API_SECRET || "");
+  if (!token || !apiKey || !apiSecret) return null;
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    if (header?.alg !== "HS256" || (header?.typ && header.typ !== "JWT")) return null;
+
+    const actualSignature = Buffer.from(parts[2], "base64url");
+    const expectedSignature = crypto
+      .createHmac("sha256", apiSecret)
+      .update(parts[0] + "." + parts[1])
+      .digest();
+    if (
+      actualSignature.length !== expectedSignature.length ||
+      !crypto.timingSafeEqual(actualSignature, expectedSignature)
+    ) {
+      return null;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const clockSkew = 5;
+    const exp = Number(payload?.exp);
+    const nbf = Number(payload?.nbf);
+    const iat = Number(payload?.iat);
+    const expectedHost = DEFAULT_SHOP + ".myshopify.com";
+    const dest = new URL(String(payload?.dest || ""));
+    const issuer = new URL(String(payload?.iss || ""));
+    const audience = Array.isArray(payload?.aud) ? payload.aud : [payload?.aud];
+    const userId = String(payload?.sub || "");
+    if (
+      !Number.isFinite(exp) ||
+      !Number.isFinite(nbf) ||
+      !Number.isFinite(iat) ||
+      exp < now - clockSkew ||
+      nbf > now + clockSkew ||
+      iat > now + clockSkew ||
+      dest.protocol !== "https:" ||
+      dest.hostname !== expectedHost ||
+      issuer.protocol !== "https:" ||
+      issuer.hostname !== expectedHost ||
+      issuer.pathname.replace(/\/$/, "") !== "/admin" ||
+      !audience.includes(apiKey) ||
+      !/^\d+$/.test(userId)
+    ) {
+      return null;
+    }
+    return {
+      shop: DEFAULT_SHOP,
+      userId,
+      createdAt: iat * 1000,
+      authenticatedBy: "shopify_session_token",
+    };
+  } catch {
+    return null;
+  }
+}
+
 function sessionFrom(req) {
+  const shopifySession = shopifySessionTokenFrom(req);
+  if (shopifySession) return shopifySession;
   const raw = String(req?.headers?.cookie || "").match(/(?:^|; )tp_session=([^;]+)/)?.[1];
-  return open(raw || "");
+  const session = open(raw || "");
+  const createdAt = Number(session?.createdAt || 0);
+  if (
+    !session ||
+    !createdAt ||
+    createdAt > Date.now() + 5 * 60 * 1000 ||
+    Date.now() - createdAt > ADMIN_SESSION_MAX_AGE_MS
+  ) {
+    return null;
+  }
+  return session;
 }
 
 function shopOf(req) {
@@ -231,6 +317,7 @@ function authRequired(req, res, next) {
     "/api/webhooks/orders-create",
   ];
   if (publicPaths.includes(req.path) || sessionFrom(req)) return next();
+  res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
   return res.status(401).json({
     error: "Autenticación requerida.",
     loginUrl: "/api/auth/shopify?shop=" + DEFAULT_SHOP + ".myshopify.com",
@@ -1128,8 +1215,705 @@ app.get("/auth/callback", async (req, res) => {
 
 app.get("/api/session", (req, res) => {
   const session = sessionFrom(req);
-  res.json(session ? { authenticated: true, shop: session.shop } : { authenticated: false });
+  res.json(
+    session
+      ? {
+          authenticated: true,
+          shop: session.shop,
+          userId: session.userId || null,
+          authenticatedBy: session.authenticatedBy || "cookie",
+        }
+      : { authenticated: false },
+  );
 });
+
+function githubThemeAppConfigured() {
+  return Boolean(
+    process.env.GITHUB_THEME_APP_ID &&
+      process.env.GITHUB_THEME_INSTALLATION_ID &&
+      (process.env.GITHUB_THEME_APP_PRIVATE_KEY || process.env.GITHUB_THEME_PRIVATE_KEY),
+  );
+}
+
+function githubThemeReleaseConfigured() {
+  return Boolean(
+    githubThemeAppConfigured() ||
+      process.env.GITHUB_THEME_RELEASE_TOKEN ||
+      process.env.GITHUB_PROMOTE_TOKEN,
+  );
+}
+
+function githubAppJwt() {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ iat: now - 30, exp: now + 540, iss: process.env.GITHUB_THEME_APP_ID }),
+  ).toString("base64url");
+  const signingInput = header + "." + payload;
+  const privateKey = String(
+    process.env.GITHUB_THEME_APP_PRIVATE_KEY || process.env.GITHUB_THEME_PRIVATE_KEY || "",
+  ).replace(/\\n/g, "\n");
+  const signature = crypto
+    .sign("RSA-SHA256", Buffer.from(signingInput), privateKey)
+    .toString("base64url");
+  return signingInput + "." + signature;
+}
+
+async function githubThemeReleaseToken() {
+  if (!githubThemeAppConfigured()) {
+    return process.env.GITHUB_THEME_RELEASE_TOKEN || process.env.GITHUB_PROMOTE_TOKEN || "";
+  }
+  if (
+    githubInstallationTokenCache?.value &&
+    Date.now() < githubInstallationTokenCache.expiresAt - 60 * 1000
+  ) {
+    return githubInstallationTokenCache.value;
+  }
+
+  const response = await fetch(
+    "https://api.github.com/app/installations/" +
+      encodeURIComponent(process.env.GITHUB_THEME_INSTALLATION_ID) +
+      "/access_tokens",
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: "Bearer " + githubAppJwt(),
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+      },
+      signal: AbortSignal.timeout(10000),
+    },
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.token) {
+    const error = new Error(data.message || "No se pudo autenticar la GitHub App.");
+    error.status = response.status || 502;
+    throw error;
+  }
+  githubInstallationTokenCache = {
+    value: data.token,
+    expiresAt: Date.parse(data.expires_at) || Date.now() + 50 * 60 * 1000,
+  };
+  return githubInstallationTokenCache.value;
+}
+
+function githubThemePath(path = "") {
+  return "/repos/" + GITHUB_THEME_OWNER + "/" + GITHUB_THEME_REPOSITORY + path;
+}
+
+async function githubRequest(path, options = {}) {
+  const token = await githubThemeReleaseToken();
+  if (!token) {
+    const error = new Error("La publicación del tema todavía no está conectada con GitHub.");
+    error.status = 503;
+    throw error;
+  }
+  const response = await fetch("https://api.github.com" + path, {
+    method: options.method || "GET",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: "Bearer " + token,
+      "X-GitHub-Api-Version": GITHUB_API_VERSION,
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: AbortSignal.timeout(10000),
+  });
+  const raw = await response.text();
+  let data = null;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { message: raw.slice(0, 300) };
+    }
+  }
+  if (!response.ok) {
+    const error = new Error(data?.message || "GitHub devolvió un error (" + response.status + ").");
+    error.status = response.status;
+    error.github = data;
+    const retryAfterHeader = Number(response.headers.get("retry-after"));
+    const rateLimitReset = Number(response.headers.get("x-ratelimit-reset"));
+    const rateLimitRemaining = Number(response.headers.get("x-ratelimit-remaining"));
+    const retryAfterSeconds = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+      ? Math.ceil(retryAfterHeader)
+      : (response.status === 429 || rateLimitRemaining === 0) &&
+          Number.isFinite(rateLimitReset) &&
+          rateLimitReset > 0
+        ? Math.max(1, Math.ceil(rateLimitReset - Date.now() / 1000))
+        : 0;
+    if (retryAfterSeconds > 0) {
+      error.retryAfterSeconds = retryAfterSeconds;
+      if (response.status === 403) error.status = 429;
+    }
+    throw error;
+  }
+  return data;
+}
+
+function themeReleaseUsers() {
+  const ids = String(process.env.SHOPIFY_THEME_RELEASE_USER_IDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => /^\d+$/.test(value));
+  let names = {};
+  try {
+    const parsed = JSON.parse(process.env.SHOPIFY_THEME_RELEASE_USERS_JSON || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) names = parsed;
+  } catch {}
+  return { ids: new Set(ids), names };
+}
+
+function assertThemeReleaseAdmin(req) {
+  // This mutation deliberately rejects the legacy cookie session: a fresh Shopify-signed
+  // session token identifies the individual staff account that is pressing the button.
+  const session = shopifySessionTokenFrom(req);
+  if (!session) {
+    const error = new Error("Abre esta función desde Shopify Admin para verificar tu usuario.");
+    error.status = 401;
+    throw error;
+  }
+  if (session.shop !== DEFAULT_SHOP) {
+    const error = new Error("Esta acción solo está autorizada para la tienda Trendsplant.");
+    error.status = 403;
+    throw error;
+  }
+  const allowedUsers = themeReleaseUsers();
+  if (!allowedUsers.ids.size) {
+    const error = new Error("Aún no se ha configurado la lista de usuarios que pueden publicar el tema.");
+    error.status = 503;
+    throw error;
+  }
+  if (!allowedUsers.ids.has(session.userId)) {
+    const error = new Error("Tu usuario de Shopify no tiene permiso para publicar el tema.");
+    error.status = 403;
+    throw error;
+  }
+  const origin = String(req.headers.origin || "");
+  let expectedOrigin = "";
+  try {
+    expectedOrigin = process.env.SHOPIFY_APP_URL
+      ? new URL(process.env.SHOPIFY_APP_URL).origin
+      : "";
+  } catch {}
+  if (!expectedOrigin && process.env.VERCEL) {
+    const error = new Error("SHOPIFY_APP_URL no está configurada para validar el origen.");
+    error.status = 503;
+    throw error;
+  }
+  if (
+    expectedOrigin &&
+    ((req.method !== "GET" && origin !== expectedOrigin) || (origin && origin !== expectedOrigin))
+  ) {
+    const error = new Error("Origen de la solicitud no autorizado.");
+    error.status = 403;
+    throw error;
+  }
+  return {
+    ...session,
+    actor: String(allowedUsers.names[session.userId] || "Shopify user " + session.userId).slice(0, 160),
+  };
+}
+
+function themeReleasePullQuery() {
+  const params = new URLSearchParams({
+    state: "open",
+    base: GITHUB_THEME_TARGET_BRANCH,
+    head: GITHUB_THEME_OWNER + ":" + GITHUB_THEME_SOURCE_BRANCH,
+    per_page: "1",
+  });
+  return githubThemePath("/pulls?" + params.toString());
+}
+
+async function themeReleaseStatus(shop = DEFAULT_SHOP) {
+  // Resolve both refs first so the comparison and the eventual merge operate on one immutable
+  // snapshot. Comparing branch names here would leave a race window if either branch moved.
+  const [previewRef, mainRef] = await Promise.all([
+    githubRequest(githubThemePath("/git/ref/heads/" + GITHUB_THEME_SOURCE_BRANCH)),
+    githubRequest(githubThemePath("/git/ref/heads/" + GITHUB_THEME_TARGET_BRANCH)),
+  ]);
+  const previewSha = String(previewRef?.object?.sha || "");
+  const mainSha = String(mainRef?.object?.sha || "");
+  if (!/^[0-9a-f]{40}$/i.test(previewSha) || !/^[0-9a-f]{40}$/i.test(mainSha)) {
+    const error = new Error("GitHub no devolvió referencias de rama válidas.");
+    error.status = 502;
+    throw error;
+  }
+  const [comparison, pulls, operation] = await Promise.all([
+    githubRequest(
+      githubThemePath(
+        "/compare/" + encodeURIComponent(mainSha) + "..." + encodeURIComponent(previewSha),
+      ),
+    ),
+    githubRequest(themeReleasePullQuery()),
+    readThemeReleaseGate(shop).catch(() => null),
+  ]);
+  const pull = Array.isArray(pulls) ? pulls[0] : null;
+  return {
+    configured: true,
+    repository: GITHUB_THEME_OWNER + "/" + GITHUB_THEME_REPOSITORY,
+    sourceBranch: GITHUB_THEME_SOURCE_BRANCH,
+    targetBranch: GITHUB_THEME_TARGET_BRANCH,
+    status: comparison.status,
+    aheadBy: Number(comparison.ahead_by || 0),
+    behindBy: Number(comparison.behind_by || 0),
+    canPromote: Number(comparison.ahead_by || 0) > 0,
+    previewSha,
+    mainSha,
+    compareUrl: comparison.html_url || null,
+    operation,
+    pullRequest: pull
+      ? { number: pull.number, url: pull.html_url, state: pull.state, title: pull.title }
+      : null,
+  };
+}
+
+async function getOrCreateThemeReleasePull(previewSha) {
+  const existing = await githubRequest(themeReleasePullQuery());
+  if (Array.isArray(existing) && existing[0]) return existing[0];
+  try {
+    return await githubRequest(githubThemePath("/pulls"), {
+      method: "POST",
+      body: {
+        title: "Publish preview to main",
+        head: GITHUB_THEME_SOURCE_BRANCH,
+        base: GITHUB_THEME_TARGET_BRANCH,
+        body:
+          "Publicación iniciada desde Shopify Admin.\n\nPreview SHA: `" +
+          String(previewSha || "").slice(0, 12) +
+          "`",
+        maintainer_can_modify: false,
+      },
+    });
+  } catch (error) {
+    if (error.status !== 422) throw error;
+    const raced = await githubRequest(themeReleasePullQuery());
+    if (Array.isArray(raced) && raced[0]) return raced[0];
+    throw error;
+  }
+}
+
+async function waitForPullMergeability(number) {
+  let pull = null;
+  const delays = [250, 400, 650, 1000, 1500, 2000, 2500];
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    pull = await githubRequest(githubThemePath("/pulls/" + number));
+    if (pull.mergeable !== null) break;
+    if (attempt < delays.length) {
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+  return pull;
+}
+
+async function reconcileThemeReleaseMerge(number, expectedPreviewSha) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const [pullState, mainRef] = await Promise.all([
+        githubRequest(githubThemePath("/pulls/" + number)),
+        githubRequest(githubThemePath("/git/ref/heads/" + GITHUB_THEME_TARGET_BRANCH)),
+      ]);
+      const mainSha = String(mainRef?.object?.sha || "");
+      if (/^[0-9a-f]{40}$/i.test(mainSha)) {
+        const mergeCommitSha = String(pullState?.merge_commit_sha || "");
+        const candidates = [
+          { type: "preview", sha: expectedPreviewSha },
+          ...(pullState?.merged === true && /^[0-9a-f]{40}$/i.test(mergeCommitSha)
+            ? [{ type: "pull", sha: mergeCommitSha }]
+            : []),
+        ];
+        const relations = await Promise.all(
+          candidates.map(async (candidate) => {
+            if (mainSha === candidate.sha) return { ...candidate, incorporated: true };
+            try {
+              const ancestry = await githubRequest(
+                githubThemePath(
+                  "/compare/" +
+                    encodeURIComponent(candidate.sha) +
+                    "..." +
+                    encodeURIComponent(mainSha),
+                ),
+              );
+              const behindBy = Number(ancestry?.behind_by);
+              return {
+                ...candidate,
+                incorporated:
+                  Number.isFinite(behindBy) &&
+                  behindBy === 0 &&
+                  (ancestry?.status === "ahead" || ancestry?.status === "identical"),
+              };
+            } catch (error) {
+              lastError = error;
+              return { ...candidate, incorporated: false };
+            }
+          }),
+        );
+        // The exact preview SHA being an ancestor is definitive for a merge commit. A verified
+        // merged PR commit covers repositories that enforce squash/rebase instead.
+        const incorporated = relations.find((relation) => relation.incorporated);
+        if (incorporated) {
+          return {
+            merged: true,
+            sha: mainSha,
+            pull: pullState,
+            reconciled: incorporated.type === "pull" ? "pull_and_ref" : "ref",
+          };
+        }
+      }
+      if (pullState?.state === "closed" && pullState?.merged !== true) break;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+  }
+  return { merged: false, error: lastError };
+}
+
+async function ensureThemeReleaseLockStorage() {
+  if (themeReleaseLockStorageReady) return;
+  await database()`CREATE TABLE IF NOT EXISTS trendsplant_theme_release_locks (
+    shop TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`;
+  themeReleaseLockStorageReady = true;
+}
+
+async function acquireThemeReleaseLock(shop, owner) {
+  await ensureThemeReleaseLockStorage();
+  const rows = await database()`INSERT INTO trendsplant_theme_release_locks
+    (shop, owner, expires_at, updated_at)
+    VALUES (
+      ${shop},
+      ${owner},
+      NOW() + (${THEME_RELEASE_LOCK_TTL_SECONDS}::integer * INTERVAL '1 second'),
+      NOW()
+    )
+    ON CONFLICT (shop) DO UPDATE
+    SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at, updated_at = NOW()
+    WHERE trendsplant_theme_release_locks.expires_at <= NOW()
+      AND trendsplant_theme_release_locks.updated_at <=
+        NOW() - (${THEME_RELEASE_COOLDOWN_SECONDS}::integer * INTERVAL '1 second')
+    RETURNING owner, expires_at, updated_at, NOW() AS observed_at`;
+  if (rows[0]?.owner === owner) {
+    return { acquired: true, running: true, retryAfterSeconds: THEME_RELEASE_LOCK_TTL_SECONDS };
+  }
+  return { acquired: false, ...(await readThemeReleaseGate(shop)) };
+}
+
+async function releaseThemeReleaseLock(shop, owner) {
+  if (!owner) return;
+  await ensureThemeReleaseLockStorage();
+  // Keep the row as an atomic cooldown gate; a later request can replace it once the short
+  // cooldown expires. The owner match prevents an expired worker from releasing a newer lock.
+  await database()`UPDATE trendsplant_theme_release_locks
+    SET expires_at = NOW(), updated_at = NOW()
+    WHERE shop = ${shop} AND owner = ${owner}`;
+}
+
+async function readThemeReleaseGate(shop) {
+  await ensureThemeReleaseLockStorage();
+  const rows = await database()`SELECT expires_at, updated_at, NOW() AS observed_at
+    FROM trendsplant_theme_release_locks
+    WHERE shop = ${shop}
+    LIMIT 1`;
+  if (!rows[0]) {
+    return { running: false, cooldown: false, retryAfterSeconds: 0 };
+  }
+  const observedAt = Date.parse(rows[0].observed_at) || Date.now();
+  const expiresAt = Date.parse(rows[0].expires_at) || 0;
+  const updatedAt = Date.parse(rows[0].updated_at) || 0;
+  const cooldownUntil = updatedAt + THEME_RELEASE_COOLDOWN_SECONDS * 1000;
+  const running = expiresAt > observedAt;
+  const blockedUntil = running ? expiresAt : cooldownUntil;
+  const remainingSeconds = Math.max(0, Math.ceil((blockedUntil - observedAt) / 1000));
+  // Active work normally completes quickly; advise a short poll without weakening the
+  // 15-minute server-side lock that protects against an abandoned worker.
+  const retryAfterSeconds = running ? Math.min(15, remainingSeconds) : remainingSeconds;
+  return {
+    running,
+    cooldown: !running && retryAfterSeconds > 0,
+    retryAfterSeconds,
+    startedAt: running && updatedAt ? new Date(updatedAt).toISOString() : null,
+    expiresAt: running && expiresAt ? new Date(expiresAt).toISOString() : null,
+  };
+}
+
+async function ensureThemeReleaseAuditStorage() {
+  if (themeReleaseAuditStorageReady) return;
+  await database()`CREATE TABLE IF NOT EXISTS trendsplant_theme_release_audit (
+    id BIGSERIAL PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    shop TEXT NOT NULL,
+    actor TEXT,
+    shopify_user_id TEXT,
+    event TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    preview_sha TEXT,
+    main_sha_before TEXT,
+    main_sha_after TEXT,
+    pull_request_number BIGINT,
+    pull_request_url TEXT,
+    error TEXT,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`;
+  await database()`ALTER TABLE trendsplant_theme_release_audit
+    ADD COLUMN IF NOT EXISTS actor TEXT`;
+  await database()`ALTER TABLE trendsplant_theme_release_audit
+    ADD COLUMN IF NOT EXISTS shopify_user_id TEXT`;
+  await database()`CREATE INDEX IF NOT EXISTS trendsplant_theme_release_audit_shop_created_idx
+    ON trendsplant_theme_release_audit (shop, created_at DESC)`;
+  themeReleaseAuditStorageReady = true;
+}
+
+async function appendThemeReleaseAudit(entry) {
+  await ensureThemeReleaseAuditStorage();
+  const details = entry.details && typeof entry.details === "object" ? entry.details : {};
+  await database()`INSERT INTO trendsplant_theme_release_audit (
+    request_id, shop, actor, shopify_user_id, event, status, source_branch, target_branch,
+    preview_sha, main_sha_before, main_sha_after, pull_request_number,
+    pull_request_url, error, details
+  ) VALUES (
+    ${entry.requestId},
+    ${entry.shop},
+    ${entry.actor || null},
+    ${entry.shopifyUserId || null},
+    ${entry.event},
+    ${entry.status},
+    ${GITHUB_THEME_SOURCE_BRANCH},
+    ${GITHUB_THEME_TARGET_BRANCH},
+    ${entry.previewSha || null},
+    ${entry.mainShaBefore || null},
+    ${entry.mainShaAfter || null},
+    ${entry.pullRequestNumber || null},
+    ${entry.pullRequestUrl || null},
+    ${entry.error ? String(entry.error).slice(0, 2000) : null},
+    ${JSON.stringify(details)}::jsonb
+  )`;
+}
+
+async function themeReleaseStatusRoute(req, res) {
+  try {
+    const session = assertThemeReleaseAdmin(req);
+    if (!githubThemeReleaseConfigured()) {
+      return res.json({
+        configured: false,
+        repository: GITHUB_THEME_OWNER + "/" + GITHUB_THEME_REPOSITORY,
+        sourceBranch: GITHUB_THEME_SOURCE_BRANCH,
+        targetBranch: GITHUB_THEME_TARGET_BRANCH,
+        canPromote: false,
+        message: "Falta configurar la credencial segura de GitHub en Vercel.",
+        authorizedUser: { id: session.userId, name: session.actor },
+      });
+    }
+    res.json({
+      ...(await themeReleaseStatus(session.shop)),
+      authorizedUser: { id: session.userId, name: session.actor },
+    });
+  } catch (error) {
+    if (error.status === 401) {
+      res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
+    }
+    if (error.retryAfterSeconds) {
+      res.setHeader("Retry-After", String(error.retryAfterSeconds));
+    }
+    res.status(error.status >= 400 && error.status < 600 ? error.status : 502).json({
+      error: error.message,
+    });
+  }
+}
+
+async function promoteThemeRelease(req, res) {
+  const startedAt = new Date().toISOString();
+  const requestId = crypto.randomUUID();
+  let shop = DEFAULT_SHOP;
+  let pull = null;
+  let lockOwner = null;
+  let lockAcquired = false;
+  let before = null;
+  let actor = null;
+  let shopifyUserId = null;
+  try {
+    const session = assertThemeReleaseAdmin(req);
+    shop = session.shop;
+    actor = session.actor;
+    shopifyUserId = session.userId;
+    lockOwner = crypto.randomUUID();
+    const gate = await acquireThemeReleaseLock(shop, lockOwner);
+    if (!gate.acquired) {
+      const retryAfterSeconds = Math.max(1, Number(gate.retryAfterSeconds || 1));
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      await appendThemeReleaseAudit({
+        requestId,
+        shop,
+        actor,
+        shopifyUserId,
+        event: gate.running ? "rejected_running" : "rejected_cooldown",
+        status: "rejected",
+        details: { retryAfterSeconds },
+      }).catch(() => {});
+      return res.status(gate.running ? 409 : 429).json({
+        requestId,
+        error: gate.running
+          ? "Ya hay otra publicación preview → main en curso."
+          : "Espera unos segundos antes de iniciar otra publicación.",
+        operation: gate,
+      });
+    }
+    lockAcquired = true;
+    before = await themeReleaseStatus(shop);
+    // The first audit row is required before any GitHub mutation. Subsequent rows are inserts,
+    // never read-modify-write updates to the encrypted application-state blob.
+    await appendThemeReleaseAudit({
+      requestId,
+      shop,
+      actor,
+      shopifyUserId,
+      event: "started",
+      status: "running",
+      previewSha: before.previewSha,
+      mainShaBefore: before.mainSha,
+    });
+    if (!before.canPromote) {
+      await appendThemeReleaseAudit({
+        requestId,
+        shop,
+        actor,
+        shopifyUserId,
+        event: "already_current",
+        status: "complete",
+        previewSha: before.previewSha,
+        mainShaBefore: before.mainSha,
+        mainShaAfter: before.mainSha,
+      }).catch(() => {});
+      return res.json({
+        ok: true,
+        requestId,
+        status: "already_current",
+        message: "Main ya contiene todos los cambios de preview.",
+        release: before,
+      });
+    }
+
+    pull = await getOrCreateThemeReleasePull(before.previewSha);
+    pull = await waitForPullMergeability(pull.number);
+    if (!pull || pull.mergeable === null) {
+      const error = new Error("GitHub todavía está analizando si el cambio se puede fusionar.");
+      error.status = 409;
+      throw error;
+    }
+    if (pull.mergeable === false) {
+      const error = new Error("Preview tiene conflictos con main. No se ha publicado ningún cambio.");
+      error.status = 409;
+      error.pullUrl = pull.html_url;
+      throw error;
+    }
+
+    let result = null;
+    let mergeError = null;
+    try {
+      result = await githubRequest(githubThemePath("/pulls/" + pull.number + "/merge"), {
+        method: "PUT",
+        body: {
+          merge_method: "merge",
+          sha: before.previewSha,
+          commit_title: "Publish preview to main",
+          commit_message: "Triggered from Shopify Admin.",
+        },
+      });
+    } catch (error) {
+      // A timeout or connection reset can hide a successful server-side merge. Reconcile the
+      // immutable preview SHA against both the PR and main before reporting a failure/retrying.
+      mergeError = error;
+    }
+    if (!result?.merged) {
+      const reconciled = await reconcileThemeReleaseMerge(pull.number, before.previewSha);
+      if (reconciled.merged) {
+        result = {
+          merged: true,
+          sha: reconciled.sha,
+          message: "Merge confirmado tras reconciliar el estado de GitHub.",
+          reconciled: reconciled.reconciled,
+        };
+      } else {
+        const error = mergeError || new Error(
+          result?.message || "GitHub no ha podido completar la publicación.",
+        );
+        error.status = error.status || 409;
+        error.pullUrl = pull.html_url;
+        throw error;
+      }
+    }
+
+    const completedAt = new Date().toISOString();
+    let auditRecorded = true;
+    await appendThemeReleaseAudit({
+      requestId,
+      shop,
+      actor,
+      shopifyUserId,
+      event: result.reconciled ? "completed_reconciled" : "completed",
+      status: "complete",
+      previewSha: before.previewSha,
+      mainShaBefore: before.mainSha,
+      mainShaAfter: result.sha || null,
+      pullRequestNumber: pull.number,
+      pullRequestUrl: pull.html_url,
+      details: { startedAt, completedAt, reconciliation: result.reconciled || null },
+    }).catch(() => {
+      auditRecorded = false;
+    });
+    res.json({
+      ok: true,
+      requestId,
+      status: "complete",
+      message: "Preview se ha publicado correctamente en main.",
+      commitSha: result.sha || null,
+      pullRequest: { number: pull.number, url: pull.html_url },
+      reconciled: Boolean(result.reconciled),
+      auditRecorded,
+    });
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    await appendThemeReleaseAudit({
+      requestId,
+      shop,
+      actor,
+      shopifyUserId,
+      event: "failed",
+      status: "failed",
+      previewSha: before?.previewSha || null,
+      mainShaBefore: before?.mainSha || null,
+      pullRequestNumber: pull?.number || null,
+      pullRequestUrl: error.pullUrl || pull?.html_url || null,
+      error: error.message,
+      details: { startedAt, failedAt },
+    }).catch(() => {});
+    if (error.status === 401) {
+      res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
+    }
+    if (error.retryAfterSeconds) {
+      res.setHeader("Retry-After", String(error.retryAfterSeconds));
+    }
+    res.status(error.status >= 400 && error.status < 600 ? error.status : 502).json({
+      requestId,
+      error: error.message,
+      pullRequestUrl: error.pullUrl || pull?.html_url || null,
+    });
+  } finally {
+    if (lockAcquired) await releaseThemeReleaseLock(shop, lockOwner).catch(() => {});
+  }
+}
+
+app.get("/api/theme-release/status", themeReleaseStatusRoute);
+app.get("/api/theme-release-status", themeReleaseStatusRoute);
+app.post("/api/theme-release/promote", promoteThemeRelease);
+app.post("/api/theme-release-promote", promoteThemeRelease);
 
 function freshAnalytics() {
   return {

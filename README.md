@@ -34,3 +34,26 @@ Abrir `http://localhost:3000`.
 ## Deployment
 
 La configuración está preparada para desplegarse como función Node.js en Vercel.
+
+### Publicación del tema desde Shopify Admin
+
+El panel incluye un control fijo para integrar `preview` en `main` del repositorio
+`Trendsplant/tpshopify`. La credencial nunca se envía al navegador.
+
+La opción recomendada es instalar una GitHub App privada solo en ese repositorio
+y configurar en Vercel `GITHUB_THEME_APP_ID`,
+`GITHUB_THEME_INSTALLATION_ID` y `GITHUB_THEME_APP_PRIVATE_KEY`. La app necesita
+permisos `Contents: read/write` y `Pull requests: read/write`; sus tokens de
+instalación caducan automáticamente.
+
+El endpoint exige un ID token reciente de Shopify App Bridge y una lista
+cerrada de usuarios. Configura `SHOPIFY_THEME_RELEASE_USER_IDS` con los IDs
+numéricos permitidos, separados por comas. Opcionalmente,
+`SHOPIFY_THEME_RELEASE_USERS_JSON` puede mapear esos IDs a nombres para la
+auditoría, por ejemplo `{"72920924238":"Iván"}`. Si la lista no existe, la
+publicación queda bloqueada para todos.
+
+Como alternativa temporal, `GITHUB_THEME_RELEASE_TOKEN` acepta un token de
+alcance fino con esos mismos permisos. El backend crea o reutiliza un pull
+request, comprueba conflictos y solo entonces realiza un merge commit; nunca
+hace force push.

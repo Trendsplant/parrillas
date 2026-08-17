@@ -2162,32 +2162,7 @@ async function integrationHealth(req, res) {
     const strategy = await loadStrategy(shop, req);
     const analytics = await readAnalytics(shop);
     const state = await readState(shop).catch(() => null);
-    const now = Date.now();
-    const targets = collectionHandlesFor(strategy).map((handle) => {
-      const heartbeat = analytics.integrationHealth?.storefrontCollections?.[handle] || null;
-      const lastSeenAt = heartbeat?.lastSeenAt || null;
-      const ageMs = lastSeenAt ? Math.max(0, now - Date.parse(lastSeenAt)) : null;
-      const stale = ageMs !== null && ageMs > 24 * 60 * 60 * 1000;
-      const status = !strategy.enabled
-        ? "disabled"
-        : !heartbeat
-          ? "waiting_for_visit"
-          : !heartbeat.gridReady
-            ? "grid_not_detected"
-            : stale
-              ? "stale"
-              : "active";
-      return {
-        handle,
-        status,
-        mode: strategy.mode,
-        lastSeenAt,
-        sessions: Number(heartbeat?.sessions || 0),
-        gridReady: heartbeat?.gridReady === true,
-        integrationVersion: heartbeat?.integrationVersion || null,
-        strategyVersion: heartbeat?.strategyVersion || null,
-      };
-    });
+    const targets = integrationHealthTargets(strategy, analytics);
     res.json({
       targets,
       themeScope: "all_collection_pages",
@@ -2200,6 +2175,147 @@ async function integrationHealth(req, res) {
 }
 
 app.get("/api/integration-health", integrationHealth);
+
+function integrationHealthTargets(strategy, analytics, now = Date.now()) {
+  return collectionHandlesFor(strategy).map((handle) => {
+    const heartbeat = analytics.integrationHealth?.storefrontCollections?.[handle] || null;
+    const lastSeenAt = heartbeat?.lastSeenAt || null;
+    const ageMs = lastSeenAt ? Math.max(0, now - Date.parse(lastSeenAt)) : null;
+    const stale = ageMs !== null && ageMs > 24 * 60 * 60 * 1000;
+    const status = !strategy.enabled
+      ? "disabled"
+      : !heartbeat
+        ? "waiting_for_visit"
+        : !heartbeat.gridReady
+          ? "grid_not_detected"
+          : stale
+            ? "stale"
+            : "active";
+    return {
+      handle,
+      status,
+      mode: strategy.mode,
+      lastSeenAt,
+      sessions: Number(heartbeat?.sessions || 0),
+      gridReady: heartbeat?.gridReady === true,
+      integrationVersion: heartbeat?.integrationVersion || null,
+      strategyVersion: heartbeat?.strategyVersion || null,
+    };
+  });
+}
+
+function largestDimension(rows, metric = "impressions") {
+  return Object.entries(rows || {})
+    .map(([key, value]) => ({ key, ...value }))
+    .sort((left, right) => Number(right[metric] || 0) - Number(left[metric] || 0))[0] || null;
+}
+
+async function decisionCenter(req, res) {
+  try {
+    const shop = shopOf(req);
+    const [strategy, analytics, state] = await Promise.all([
+      loadStrategy(shop, req),
+      readAnalytics(shop),
+      readState(shop).catch(() => null),
+    ]);
+    const targets = integrationHealthTargets(strategy, analytics);
+    const liveVisitors = liveVisitorsWithinRetention(analytics.liveVisitors);
+    const activeTargets = targets.filter((target) => target.status === "active");
+    const signalLabels = {
+      temperatureFit: "Temperatura",
+      countryAffinity: "País",
+      recentSales: "Ventas recientes",
+      newness: "Novedad",
+      availability: "Disponibilidad",
+    };
+    const leadingSignal = Object.entries(strategy.weights || {})
+      .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))[0] || null;
+    const topCountry = largestDimension(analytics.dimensions?.countries);
+    const topCollection = largestDimension(analytics.dimensions?.collections);
+    const actions = [];
+    if (strategy.mode !== "live") {
+      actions.push({
+        priority: "high",
+        title: "La estrategia aún está en simulación",
+        detail: "Los rankings se calculan pero no se aplican al storefront. Activa Live cuando estés conforme con la configuración.",
+        destination: "strategy",
+      });
+    }
+    if (!targets.length) {
+      actions.push({
+        priority: "high",
+        title: "No hay colecciones objetivo",
+        detail: "Añade hasta cuatro colecciones para que la estrategia tenga un ámbito claro.",
+        destination: "strategy",
+      });
+    }
+    targets.filter((target) => target.status !== "active").forEach((target) => {
+      const detailByStatus = {
+        disabled: "La estrategia está desactivada para esta colección.",
+        waiting_for_visit: "Todavía no ha habido una visita desde que se configuró; entra en la colección para comprobarla.",
+        grid_not_detected: "El storefront no detectó una parrilla de productos en la última visita.",
+        stale: "La última señal del storefront tiene más de 24 horas.",
+      };
+      actions.push({
+        priority: target.status === "grid_not_detected" ? "high" : "medium",
+        title: "Revisar “" + target.handle + "”",
+        detail: detailByStatus[target.status] || "La integración necesita una comprobación.",
+        destination: "strategy",
+      });
+    });
+    if (!state?.integrations?.ordersWebhook?.active) {
+      actions.push({
+        priority: "medium",
+        title: "Activa el webhook de compras",
+        detail: "Sin él, la señal de ventas recientes no incorpora las compras nuevas de Shopify.",
+        destination: "analytics",
+      });
+    }
+    if (!analytics.lastEventAt) {
+      actions.push({
+        priority: "medium",
+        title: "Aún no hay señal suficiente",
+        detail: "Deja que entren visitas reales a las colecciones objetivo para validar el ranking con datos del storefront.",
+        destination: "visitors",
+      });
+    }
+    if (!actions.length) {
+      actions.push({
+        priority: "ready",
+        title: "La estrategia está lista para observar",
+        detail: "Las colecciones objetivo están activas y recibiendo señal del storefront. Revisa los visitantes para contrastar el orden entregado.",
+        destination: "visitors",
+      });
+    }
+    res.json({
+      generatedAt: new Date().toISOString(),
+      strategy: {
+        mode: strategy.mode,
+        enabled: Boolean(strategy.enabled),
+        targets: collectionHandlesFor(strategy),
+        leadingSignal: leadingSignal
+          ? { key: leadingSignal[0], label: signalLabels[leadingSignal[0]] || leadingSignal[0], weight: Number(leadingSignal[1] || 0) }
+          : null,
+      },
+      health: { targets, activeTargets: activeTargets.length, totalTargets: targets.length },
+      activity: {
+        visitors24h: liveVisitors.length,
+        impressions: Number(analytics.impressions || 0),
+        clicks: Number(analytics.clicks || 0),
+        addToCart: Number(analytics.addToCart || 0),
+        purchases: Number(analytics.purchases || 0),
+        lastEventAt: analytics.lastEventAt || null,
+        topCountry: topCountry ? { key: topCountry.key, impressions: Number(topCountry.impressions || 0) } : null,
+        topCollection: topCollection ? { key: topCollection.key, impressions: Number(topCollection.impressions || 0) } : null,
+      },
+      actions: actions.slice(0, 6),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/decision-center", decisionCenter);
 
 async function analyticsSummary(req, res) {
   try {

@@ -2321,6 +2321,150 @@ async function decisionCenter(req, res) {
 
 app.get("/api/decision-center", decisionCenter);
 
+async function recommendations(req, res) {
+  try {
+    const shop = shopOf(req);
+    const [strategy, analytics, state] = await Promise.all([
+      loadStrategy(shop, req),
+      readAnalytics(shop),
+      readState(shop).catch(() => null),
+    ]);
+    const targets = integrationHealthTargets(strategy, analytics);
+    const activeTargets = targets.filter((target) => target.status === "active");
+    const impressions = Number(analytics.impressions || 0);
+    const clicks = Number(analytics.clicks || 0);
+    const addToCart = Number(analytics.addToCart || 0);
+    const purchases = Number(analytics.purchases || 0);
+    const ctr = impressions ? (clicks / impressions) * 100 : 0;
+    const atcRate = clicks ? (addToCart / clicks) * 100 : 0;
+    const countryRows = Object.keys(analytics.dimensions?.countries || {}).length;
+    const recommendations = [];
+    const add = (priority, title, detail, rationale, destination) =>
+      recommendations.push({ priority, title, detail, rationale, destination });
+
+    if (!targets.length) {
+      add(
+        "high",
+        "Define las colecciones que quieres optimizar",
+        "Añade entre una y cuatro colecciones objetivo antes de evaluar el impacto del ranking.",
+        "No hay ninguna colección configurada en el ámbito de la estrategia.",
+        "strategy",
+      );
+    }
+    const inactiveTargets = targets.filter((target) => target.status !== "active");
+    if (inactiveTargets.length) {
+      const names = inactiveTargets.map((target) => target.handle).join(", ");
+      add(
+        inactiveTargets.some((target) => target.status === "grid_not_detected") ? "high" : "medium",
+        "Confirma la integración de las colecciones objetivo",
+        "Entra en " + names + " y verifica que la parrilla de productos se detecta correctamente.",
+        inactiveTargets.length + " colección(es) aún no han enviado una señal activa del storefront.",
+        "collections",
+      );
+    }
+    if (strategy.mode !== "live") {
+      add(
+        "high",
+        "Pasa la estrategia a Live cuando termines de probar",
+        "En simulación puedes revisar el ranking, pero todavía no modifica el orden que ven los visitantes.",
+        "La estrategia actual está configurada en modo " + strategy.mode + ".",
+        "strategy",
+      );
+    }
+    if (!state?.integrations?.ordersWebhook?.active) {
+      add(
+        "medium",
+        "Conecta las compras de Shopify",
+        "Activa el webhook de compras para que ingresos y ventas recientes se actualicen con cada pedido nuevo.",
+        "No hay un webhook de pedidos activo en la integración.",
+        "analytics",
+      );
+    }
+    if (!analytics.lastEventAt) {
+      add(
+        "medium",
+        "Recoge las primeras señales del storefront",
+        "Abre una colección objetivo o espera tráfico real para que la app pueda contrastar la recomendación con comportamiento real.",
+        "Todavía no se ha registrado ninguna impresión, clic, carrito ni sesión.",
+        "visitors",
+      );
+    }
+    if (impressions >= 100 && ctr < 1) {
+      add(
+        "medium",
+        "Revisa la relevancia de los primeros productos",
+        "El interés inicial es bajo; comprueba en Visitantes en vivo si los primeros resultados encajan con cada país y temperatura.",
+        "Hay " + impressions + " impresiones y un CTR de " + Math.round(ctr * 100) / 100 + "%.",
+        "visitors",
+      );
+    }
+    if (clicks >= 25 && atcRate < 5) {
+      add(
+        "medium",
+        "Contrasta clics con intención de compra",
+        "Los productos generan visitas pero pocos carritos; revisa precio, disponibilidad y ficha de los más clicados.",
+        "Hay " + clicks + " clics y una tasa de add-to-cart de " + Math.round(atcRate * 100) / 100 + "%.",
+        "analytics",
+      );
+    }
+    if (countryRows >= 2 && Number(strategy.weights?.countryAffinity || 0) === 0) {
+      add(
+        "medium",
+        "Prueba a dar peso a País",
+        "Ya recibes actividad de varios mercados; una prueba controlada con País puede adaptar el orden a la demanda local.",
+        "Se han registrado señales de " + countryRows + " países y País tiene un peso del 0%.",
+        "strategy",
+      );
+    }
+    if (!strategy.exclusions?.excludeOutOfStock) {
+      add(
+        "medium",
+        "Evita destacar productos sin stock",
+        "Activa la exclusión de productos sin stock si tu prioridad es reducir fricción en la parrilla.",
+        "La exclusión de productos agotados está desactivada.",
+        "strategy",
+      );
+    }
+    if (Number(strategy.weights?.recentSales || 0) >= 40 && purchases === 0) {
+      add(
+        "medium",
+        "Valida la señal de ventas recientes antes de depender de ella",
+        "Mantén este peso en prueba hasta que entren pedidos nuevos y puedas comparar su efecto con datos propios.",
+        "Ventas recientes pesa " + Number(strategy.weights.recentSales || 0) + "% y aún no hay compras registradas.",
+        "analytics",
+      );
+    }
+    if (!recommendations.length) {
+      add(
+        "ready",
+        "La estrategia tiene una base saludable",
+        "Mantén la observación durante varios días antes de cambiar pesos; así tendrás una comparación más fiable.",
+        activeTargets.length + " colección(es) están activas, el storefront envía señales y no hay alertas prioritarias.",
+        "decisions",
+      );
+    }
+
+    const priorityOrder = { high: 0, medium: 1, ready: 2 };
+    recommendations.sort((left, right) => priorityOrder[left.priority] - priorityOrder[right.priority]);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      summary: {
+        highPriority: recommendations.filter((item) => item.priority === "high").length,
+        activeTargets: activeTargets.length,
+        totalTargets: targets.length,
+        impressions,
+        signalsAvailable: [analytics.lastEventAt, state?.integrations?.ordersWebhook?.active, activeTargets.length > 0, countryRows > 0]
+          .filter(Boolean).length,
+      },
+      recommendations: recommendations.slice(0, 7),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/recommendations", recommendations);
+
 async function analyticsSummary(req, res) {
   try {
     const shop = shopOf(req);
@@ -2543,4 +2687,5 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
+
 

@@ -2245,7 +2245,9 @@ async function searchInsights(req, res) {
     const totalSearches = rows.reduce((total, row) => total + row.searches, 0);
     const totalZeroResults = rows.reduce((total, row) => total + row.zeroResults, 0);
     const totalResultClicks = rows.reduce((total, row) => total + row.resultClicks, 0);
-    const bySearches = [...rows].sort((left, right) => right.searches - left.searches || right.resultClicks - left.resultClicks);
+    const bySearches = rows
+      .filter((row) => row.searches > row.zeroResults)
+      .sort((left, right) => right.searches - left.searches || right.resultClicks - left.resultClicks);
     const noResults = rows
       .filter((row) => row.zeroResults > 0)
       .sort((left, right) => right.zeroResults - left.zeroResults || right.searches - left.searches);

@@ -34,12 +34,26 @@
     return app + path + (path.indexOf("?") === -1 ? "?" : "&") + "shop=" + encodeURIComponent(shop);
   }
 
-  function send(event, productId) {
+  function rankingSnapshot(data) {
+    if (!data || !Array.isArray(data.products)) return [];
+    return data.products.slice(0, 8).map(function (product, index) {
+      return {
+        position: index + 1,
+        id: product.id,
+        handle: product.handle,
+        title: product.title,
+        score: product.score,
+        reasons: Array.isArray(product.reasons) ? product.reasons : []
+      };
+    });
+  }
+
+  function send(event, productId, extra) {
     if (targetEnabled !== true) return Promise.resolve();
     return fetch(api("/api/analytics-events"), {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
-      body: JSON.stringify({
+      body: JSON.stringify(Object.assign({
         shop: shop,
         event: event,
         productId: productId,
@@ -50,7 +64,7 @@
         gridReady: Boolean(document.querySelector(gridSelector)),
         integrationVersion: INTEGRATION_VERSION,
         strategyVersion: rankingData && rankingData.strategyVersion
-      }),
+      }, extra || {})),
       keepalive: true
     }).catch(function () {});
   }
@@ -346,7 +360,11 @@
       return;
     }
     targetEnabled = true;
-    send("session");
+    send("session", null, {
+      ranking: rankingSnapshot(data),
+      rankingMode: data.mode || "simulation",
+      rankingApplied: data.mode === "live"
+    });
     scheduleInitialRanking();
   }).catch(function () {
     rankingData = null;

@@ -6,8 +6,10 @@
   var cfg = window.TrendsplantOrdering || {};
   var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
   var shop = (window.Shopify && window.Shopify.shop) || location.hostname;
+  var pathMatch = location.pathname.match(/\/collections\/([^/]+)/);
+  var collectionPage = Boolean(pathMatch || cfg.collectionHandle);
   var gridSelector = cfg.gridSelector || "#AjaxinateLoop,[data-product-grid],#product-grid,.product-grid,.collection .grid";
-  var grid = document.querySelector(gridSelector);
+  var grid = collectionPage ? document.querySelector(gridSelector) : null;
   var reorderTimer = null;
   var sessionId = "tp-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   var rankingContext = { country: null, temperatureC: null };
@@ -27,12 +29,85 @@
   if (document.body.dataset.trendsplantOrderingBound === "1") return;
   document.body.dataset.trendsplantOrderingBound = "1";
 
-  var pathMatch = location.pathname.match(/\/collections\/([^/]+)/);
   var handle = cfg.collectionHandle || (pathMatch && pathMatch[1]) || "men";
 
   function api(path) {
     return app + path + (path.indexOf("?") === -1 ? "?" : "&") + "shop=" + encodeURIComponent(shop);
   }
+
+  function searchTerm() {
+    var term = new URL(location.href).searchParams.get("q") || "";
+    return term.trim().replace(/\s+/g, " ");
+  }
+
+  function isSearchPage() {
+    var parts = location.pathname.split("/").filter(Boolean);
+    return parts[parts.length - 1] === "search";
+  }
+
+  function sendSearch(event, extra) {
+    var term = searchTerm();
+    if (term.length < 2) return Promise.resolve();
+    return fetch(api("/api/analytics-events"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-TP-Session": sessionId },
+      body: JSON.stringify(Object.assign({
+        shop: shop,
+        event: event,
+        searchTerm: term,
+        sessionId: sessionId
+      }, extra || {})),
+      keepalive: true
+    }).catch(function () {});
+  }
+
+  function searchResultLinks() {
+    var main = document.querySelector("main") || document.body;
+    return Array.from(main.querySelectorAll('a[href*="/products/"]')).filter(function (link) {
+      return !link.closest("header,footer,.site-header,.announcement-bar");
+    });
+  }
+
+  function recordSearchPage() {
+    if (!isSearchPage() || document.body.dataset.tpSearchRecorded === "1") return;
+    var term = searchTerm();
+    if (term.length < 2) return;
+    var attempts = 0;
+    function report() {
+      attempts += 1;
+      var links = searchResultLinks();
+      var resultArea = document.querySelector("main .search-page,main [data-search-results],main #search-results,main .globo-filter") || document.querySelector("main");
+      var text = String(resultArea && resultArea.textContent || "").toLowerCase();
+      var saysNoResults = /no hemos encontrado|sin resultados|no results|no products/.test(text);
+      if (!links.length && !saysNoResults && attempts < 5) return window.setTimeout(report, 500);
+      document.body.dataset.tpSearchRecorded = "1";
+      sendSearch("search", { searchResultsCount: links.length });
+    }
+    window.setTimeout(report, 800);
+  }
+
+  function wireSearchProductClicks() {
+    if (!isSearchPage()) return;
+    document.addEventListener("click", function (event) {
+      var link = event.target && event.target.closest('a[href*="/products/"]');
+      if (!link || !link.closest("main")) return;
+      var match = link.href.match(/\/products\/([^/?#]+)/);
+      if (!match) return;
+      var titleNode = link.querySelector("[data-product-title],.product-card__title,.product-item__title,h2,h3,h4") || link;
+      sendSearch("search_result_click", {
+        productHandle: match[1],
+        productTitle: String(titleNode.textContent || match[1]).trim().slice(0, 180)
+      });
+    }, true);
+  }
+
+  wireSearchProductClicks();
+  recordSearchPage();
+  ["globoFilterRenderSearchCompleted", "shopify:section:load"].forEach(function (eventName) {
+    window.addEventListener(eventName, recordSearchPage);
+  });
+
+  if (!collectionPage) return;
 
   function rankingSnapshot(data) {
     if (!data || !Array.isArray(data.products)) return [];
@@ -375,3 +450,4 @@
   // This script only ranks a fixed batch of product cards after the theme
   // announces that it has finished appending that batch.
 })();
+

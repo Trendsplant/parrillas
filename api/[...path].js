@@ -1151,9 +1151,13 @@ app.post("/api/strategy-apply", applyStrategy);
 app.get("/auth/shopify", (req, res) => {
   const shop = shopOf(req);
   const state = crypto.randomBytes(16).toString("hex");
-  const scopes = encodeURIComponent(
+  const configuredScopes = String(
     process.env.SHOPIFY_SCOPES || "read_products,write_products,read_inventory,read_orders",
-  );
+  )
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  const scopes = encodeURIComponent([...new Set([...configuredScopes, "write_webhooks"])].join(","));
   const redirect = encodeURIComponent((process.env.SHOPIFY_APP_URL || "") + "/api/auth/callback");
   cookie(res, "tp_oauth_state", seal({ state, shop }), 600);
   res.redirect(
@@ -2451,10 +2455,19 @@ async function ensureOrdersWebhook(shop, req) {
 }
 
 async function webhookSetup(req, res) {
+  const shop = shopOf(req);
   try {
-    res.json(await ensureOrdersWebhook(shopOf(req), req));
+    res.json(await ensureOrdersWebhook(shop, req));
   } catch (error) {
-    res.status(502).json({ error: error.message });
+    const message = String(error?.message || "No se pudo activar el webhook de compras.");
+    const needsReauthorization = /access|denied|scope|permission|webhook/i.test(message);
+    res.status(needsReauthorization ? 403 : 502).json({
+      error: message,
+      reauthorize: needsReauthorization,
+      reauthorizeUrl: needsReauthorization
+        ? "/api/auth/shopify?shop=" + encodeURIComponent(shop + ".myshopify.com")
+        : null,
+    });
   }
 }
 

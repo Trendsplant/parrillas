@@ -1936,6 +1936,7 @@ function freshAnalytics() {
     lastEventAt: null,
     dimensions: { countries: {}, temperatures: {}, collections: {} },
     recentEvents: [],
+    liveVisitors: [],
     operational: { acceptedEvents: 0, invalidEvents: 0, lastErrorAt: null },
   };
 }
@@ -1957,6 +1958,7 @@ async function readAnalytics(shop) {
     },
     operational: { ...fresh.operational, ...(analytics.operational || {}) },
     recentEvents: Array.isArray(analytics.recentEvents) ? analytics.recentEvents : [],
+    liveVisitors: Array.isArray(analytics.liveVisitors) ? analytics.liveVisitors : [],
     integrationHealth: {
       storefrontCollections:
         integrationHealth.storefrontCollections && typeof integrationHealth.storefrontCollections === "object"
@@ -2003,6 +2005,30 @@ function addDimension(dimensions, name, key, metric, count, revenue = 0) {
   group[safeKey] = row;
 }
 
+const LIVE_VISITOR_RETENTION_MS = 24 * 60 * 60 * 1000;
+const LIVE_VISITOR_LIMIT = 250;
+
+function visitorRankingSnapshot(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 8).map((product, index) => ({
+    position: Math.max(1, Math.min(99, Number(product?.position) || index + 1)),
+    id: String(product?.id || "").slice(0, 100) || null,
+    handle: String(product?.handle || "").slice(0, 120) || null,
+    title: String(product?.title || "Producto").slice(0, 180),
+    score: Math.round(Math.max(0, Math.min(100000, Number(product?.score) || 0)) * 100) / 100,
+    reasons: Array.isArray(product?.reasons)
+      ? product.reasons.slice(0, 4).map((reason) => String(reason || "").slice(0, 180)).filter(Boolean)
+      : [],
+  }));
+}
+
+function liveVisitorsWithinRetention(visitors, now = Date.now()) {
+  return (Array.isArray(visitors) ? visitors : []).filter((visitor) => {
+    const at = Date.parse(visitor?.at || "");
+    return Number.isFinite(at) && now - at >= 0 && now - at <= LIVE_VISITOR_RETENTION_MS;
+  });
+}
+
 async function recordAnalytics(shop, payload, context) {
   const analytics = await readAnalytics(shop);
   const event = payload.event;
@@ -2039,6 +2065,28 @@ async function recordAnalytics(shop, payload, context) {
       };
       analytics.integrationHealth = { storefrontCollections };
     }
+
+    const visitorRef = crypto
+      .createHash("sha256")
+      .update(shop + ":" + String(payload.sessionId || "anonymous"))
+      .digest("hex")
+      .slice(0, 8)
+      .toUpperCase();
+    analytics.liveVisitors = [
+      {
+        visitorRef,
+        at: analytics.lastEventAt,
+        country: String(context.country || "unknown").slice(0, 12),
+        temperatureBand: String(context.temperatureBand || "").slice(0, 80),
+        collectionHandle: String(payload.collectionHandle || "").slice(0, 80) || null,
+        ranking: visitorRankingSnapshot(payload.ranking),
+        rankingMode: String(payload.rankingMode || "simulation").slice(0, 30),
+        rankingApplied: payload.rankingApplied === true,
+        strategyVersion: String(payload.strategyVersion || "unknown").slice(0, 100),
+        integrationVersion: String(payload.integrationVersion || "unknown").slice(0, 80),
+      },
+      ...liveVisitorsWithinRetention(analytics.liveVisitors),
+    ].slice(0, LIVE_VISITOR_LIMIT);
   }
 
   if (metric !== "sessions") {
@@ -2091,6 +2139,21 @@ async function analyticsEvent(req, res) {
 
 app.post("/api/analytics/events", analyticsEvent);
 app.post("/api/analytics-events", analyticsEvent);
+
+async function liveVisitors(req, res) {
+  try {
+    const analytics = await readAnalytics(shopOf(req));
+    res.json({
+      retentionHours: 24,
+      generatedAt: new Date().toISOString(),
+      visitors: liveVisitorsWithinRetention(analytics.liveVisitors),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/live-visitors", liveVisitors);
 
 async function integrationHealth(req, res) {
   try {

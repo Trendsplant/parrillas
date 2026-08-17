@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var INTEGRATION_VERSION = "scroll-safe-v4";
+  var INTEGRATION_VERSION = "scroll-safe-v5";
   var script = document.currentScript || document.querySelector('script[src*="parrillas-flame.vercel.app/storefront.js"]');
   var cfg = window.TrendsplantOrdering || {};
   var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
@@ -46,7 +46,10 @@
         collectionHandle: handle,
         sessionId: sessionId,
         country: rankingContext.country,
-        temperatureC: rankingContext.temperatureC
+        temperatureC: rankingContext.temperatureC,
+        gridReady: Boolean(document.querySelector(gridSelector)),
+        integrationVersion: INTEGRATION_VERSION,
+        strategyVersion: rankingData && rankingData.strategyVersion
       }),
       keepalive: true
     }).catch(function () {});

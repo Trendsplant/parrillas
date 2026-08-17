@@ -1944,6 +1944,9 @@ async function readAnalytics(shop) {
   const state = await readState(shop).catch(() => null);
   const analytics = state?.analytics || {};
   const fresh = freshAnalytics();
+  const integrationHealth = analytics.integrationHealth && typeof analytics.integrationHealth === "object"
+    ? analytics.integrationHealth
+    : {};
   return {
     ...fresh,
     ...analytics,
@@ -1954,6 +1957,12 @@ async function readAnalytics(shop) {
     },
     operational: { ...fresh.operational, ...(analytics.operational || {}) },
     recentEvents: Array.isArray(analytics.recentEvents) ? analytics.recentEvents : [],
+    integrationHealth: {
+      storefrontCollections:
+        integrationHealth.storefrontCollections && typeof integrationHealth.storefrontCollections === "object"
+          ? integrationHealth.storefrontCollections
+          : {},
+    },
   };
 }
 
@@ -2015,6 +2024,23 @@ async function recordAnalytics(shop, payload, context) {
   analytics.lastEventAt = new Date().toISOString();
   analytics.operational.acceptedEvents = (analytics.operational.acceptedEvents || 0) + 1;
 
+  if (event === "session") {
+    const handle = String(payload.collectionHandle || "").trim().toLowerCase();
+    if (/^[a-z0-9][a-z0-9-]*$/.test(handle)) {
+      const integrationHealth = analytics.integrationHealth || { storefrontCollections: {} };
+      const storefrontCollections = integrationHealth.storefrontCollections || {};
+      const previous = storefrontCollections[handle] || {};
+      storefrontCollections[handle] = {
+        lastSeenAt: analytics.lastEventAt,
+        sessions: Number(previous.sessions || 0) + 1,
+        gridReady: Boolean(payload.gridReady),
+        integrationVersion: String(payload.integrationVersion || previous.integrationVersion || "unknown").slice(0, 80),
+        strategyVersion: String(payload.strategyVersion || previous.strategyVersion || "unknown").slice(0, 100),
+      };
+      analytics.integrationHealth = { storefrontCollections };
+    }
+  }
+
   if (metric !== "sessions") {
     addDimension(analytics.dimensions, "countries", context.country, metric, count, revenue);
     addDimension(analytics.dimensions, "temperatures", context.temperatureBand, metric, count, revenue);
@@ -2065,6 +2091,51 @@ async function analyticsEvent(req, res) {
 
 app.post("/api/analytics/events", analyticsEvent);
 app.post("/api/analytics-events", analyticsEvent);
+
+async function integrationHealth(req, res) {
+  try {
+    const shop = shopOf(req);
+    const strategy = await loadStrategy(shop, req);
+    const analytics = await readAnalytics(shop);
+    const state = await readState(shop).catch(() => null);
+    const now = Date.now();
+    const targets = collectionHandlesFor(strategy).map((handle) => {
+      const heartbeat = analytics.integrationHealth?.storefrontCollections?.[handle] || null;
+      const lastSeenAt = heartbeat?.lastSeenAt || null;
+      const ageMs = lastSeenAt ? Math.max(0, now - Date.parse(lastSeenAt)) : null;
+      const stale = ageMs !== null && ageMs > 24 * 60 * 60 * 1000;
+      const status = !strategy.enabled
+        ? "disabled"
+        : !heartbeat
+          ? "waiting_for_visit"
+          : !heartbeat.gridReady
+            ? "grid_not_detected"
+            : stale
+              ? "stale"
+              : "active";
+      return {
+        handle,
+        status,
+        mode: strategy.mode,
+        lastSeenAt,
+        sessions: Number(heartbeat?.sessions || 0),
+        gridReady: heartbeat?.gridReady === true,
+        integrationVersion: heartbeat?.integrationVersion || null,
+        strategyVersion: heartbeat?.strategyVersion || null,
+      };
+    });
+    res.json({
+      targets,
+      themeScope: "all_collection_pages",
+      ordersWebhook: state?.integrations?.ordersWebhook || { active: false },
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/integration-health", integrationHealth);
 
 async function analyticsSummary(req, res) {
   try {

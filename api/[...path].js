@@ -1094,6 +1094,7 @@ async function simulate(req, res) {
       context,
       collection: data.collection,
       ranked: rankProducts(data.products, context, strategy),
+      weights: strategy.weights,
       strategyVersion: strategy.audit.lastUpdated,
       source,
       persistence: strategy.persistence,

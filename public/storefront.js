@@ -109,6 +109,7 @@
 
   if (!collectionPage) return;
 
+
   function rankingSnapshot(data) {
     if (!data || !Array.isArray(data.products)) return [];
     return data.products.slice(0, 8).map(function (product, index) {
@@ -450,4 +451,3 @@
   // This script only ranks a fixed batch of product cards after the theme
   // announces that it has finished appending that batch.
 })();
-

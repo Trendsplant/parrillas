@@ -1938,6 +1938,7 @@ function freshAnalytics() {
     purchases: 0,
     revenue: 0,
     sessions: 0,
+    searches: {},
     lastEventAt: null,
     dimensions: { countries: {}, temperatures: {}, collections: {} },
     recentEvents: [],
@@ -1964,6 +1965,7 @@ async function readAnalytics(shop) {
     operational: { ...fresh.operational, ...(analytics.operational || {}) },
     recentEvents: Array.isArray(analytics.recentEvents) ? analytics.recentEvents : [],
     liveVisitors: Array.isArray(analytics.liveVisitors) ? analytics.liveVisitors : [],
+    searches: analytics.searches && typeof analytics.searches === "object" ? analytics.searches : {},
     integrationHealth: {
       storefrontCollections:
         integrationHealth.storefrontCollections && typeof integrationHealth.storefrontCollections === "object"
@@ -2034,6 +2036,52 @@ function liveVisitorsWithinRetention(visitors, now = Date.now()) {
   });
 }
 
+function safeSearchTerm(value) {
+  const term = String(value || "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+  if (term.length < 2 || term.length > 80) return null;
+  if (/@/.test(term) || /\d{7,}/.test(term)) return null;
+  return term;
+}
+
+function recordSearchInsight(analytics, event, payload) {
+  const term = safeSearchTerm(payload.searchTerm);
+  if (!term) return false;
+  const searches = analytics.searches || (analytics.searches = {});
+  if (!searches[term] && Object.keys(searches).length >= 200) return false;
+  const row = searches[term] || {
+    searches: 0,
+    zeroResults: 0,
+    resultClicks: 0,
+    products: {},
+    lastAt: null,
+  };
+  if (event === "search") {
+    row.searches += 1;
+    if (Number(payload.searchResultsCount) === 0) row.zeroResults += 1;
+  }
+  if (event === "search_result_click") {
+    row.resultClicks += 1;
+    const handle = String(payload.productHandle || payload.productId || "").trim().toLowerCase();
+    if (/^[a-z0-9][a-z0-9-]{0,119}$/.test(handle)) {
+      const products = row.products || (row.products = {});
+      const product = products[handle] || {
+        handle,
+        title: String(payload.productTitle || handle).slice(0, 180),
+        clicks: 0,
+      };
+      product.clicks += 1;
+      products[handle] = product;
+      const retained = Object.entries(products)
+        .sort((left, right) => Number(right[1]?.clicks || 0) - Number(left[1]?.clicks || 0))
+        .slice(0, 30);
+      row.products = Object.fromEntries(retained);
+    }
+  }
+  row.lastAt = new Date().toISOString();
+  searches[term] = row;
+  return true;
+}
+
 async function recordAnalytics(shop, payload, context) {
   const analytics = await readAnalytics(shop);
   const event = payload.event;
@@ -2050,10 +2098,14 @@ async function recordAnalytics(shop, payload, context) {
     ? Math.max(1, Math.min(100, Array.isArray(payload.productIds) ? payload.productIds.length : 1))
     : 1;
   const revenue = event === "purchase" ? Math.max(0, Number(payload.revenue || 0)) : 0;
-  analytics[metric] = (analytics[metric] || 0) + count;
+  if (metric) analytics[metric] = (analytics[metric] || 0) + count;
   analytics.revenue = Math.round(((analytics.revenue || 0) + revenue) * 100) / 100;
   analytics.lastEventAt = new Date().toISOString();
   analytics.operational.acceptedEvents = (analytics.operational.acceptedEvents || 0) + 1;
+
+  if (event === "search" || event === "search_result_click") {
+    recordSearchInsight(analytics, event, payload);
+  }
 
   if (event === "session") {
     const handle = String(payload.collectionHandle || "").trim().toLowerCase();
@@ -2094,7 +2146,7 @@ async function recordAnalytics(shop, payload, context) {
     ].slice(0, LIVE_VISITOR_LIMIT);
   }
 
-  if (metric !== "sessions") {
+  if (metric && metric !== "sessions") {
     addDimension(analytics.dimensions, "countries", context.country, metric, count, revenue);
     addDimension(analytics.dimensions, "temperatures", context.temperatureBand, metric, count, revenue);
     addDimension(
@@ -2126,8 +2178,11 @@ async function analyticsEvent(req, res) {
   try {
     const shop = shopOf(req);
     const event = String(req.body?.event || "");
-    if (!["impression", "impression_batch", "click", "add_to_cart", "session"].includes(event)) {
+    if (!["impression", "impression_batch", "click", "add_to_cart", "session", "search", "search_result_click"].includes(event)) {
       return res.status(400).json({ error: "Evento no válido." });
+    }
+    if ((event === "search" || event === "search_result_click") && !safeSearchTerm(req.body?.searchTerm)) {
+      return res.status(202).json({ ok: true, ignored: true });
     }
     if (!eventAllowed(req, shop)) return res.status(429).json({ error: "Límite de eventos alcanzado." });
     const geo = geoFromRequest(req);
@@ -2159,6 +2214,60 @@ async function liveVisitors(req, res) {
 }
 
 app.get("/api/live-visitors", liveVisitors);
+
+async function searchInsights(req, res) {
+  try {
+    const analytics = await readAnalytics(shopOf(req));
+    const rows = Object.entries(analytics.searches || {})
+      .map(([term, value]) => {
+        const searches = Number(value?.searches || 0);
+        const resultClicks = Number(value?.resultClicks || 0);
+        const zeroResults = Number(value?.zeroResults || 0);
+        const products = Object.values(value?.products || {})
+          .sort((left, right) => Number(right?.clicks || 0) - Number(left?.clicks || 0))
+          .slice(0, 5)
+          .map((product) => ({
+            handle: String(product?.handle || "").slice(0, 120),
+            title: String(product?.title || product?.handle || "Producto").slice(0, 180),
+            clicks: Number(product?.clicks || 0),
+          }));
+        return {
+          term,
+          searches,
+          zeroResults,
+          resultClicks,
+          clickThroughRate: searches ? Math.round((resultClicks / searches) * 10000) / 100 : 0,
+          lastAt: value?.lastAt || null,
+          products,
+        };
+      })
+      .filter((row) => row.searches > 0 || row.resultClicks > 0);
+    const totalSearches = rows.reduce((total, row) => total + row.searches, 0);
+    const totalZeroResults = rows.reduce((total, row) => total + row.zeroResults, 0);
+    const totalResultClicks = rows.reduce((total, row) => total + row.resultClicks, 0);
+    const bySearches = [...rows].sort((left, right) => right.searches - left.searches || right.resultClicks - left.resultClicks);
+    const noResults = rows
+      .filter((row) => row.zeroResults > 0)
+      .sort((left, right) => right.zeroResults - left.zeroResults || right.searches - left.searches);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      retention: "Desde que se activó la medición",
+      summary: {
+        totalSearches,
+        uniqueTerms: rows.length,
+        totalZeroResults,
+        totalResultClicks,
+        resultClickRate: totalSearches ? Math.round((totalResultClicks / totalSearches) * 10000) / 100 : 0,
+      },
+      topSearches: bySearches.slice(0, 20),
+      noResults: noResults.slice(0, 20),
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/search-insights", searchInsights);
 
 async function integrationHealth(req, res) {
   try {
@@ -2687,5 +2796,6 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
+
 
 

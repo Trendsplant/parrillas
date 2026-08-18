@@ -42,6 +42,17 @@ const DEFAULT_STRATEGY = {
     availability: 15,
   },
   exclusions: { excludeOutOfStock: true, preserveManualProducts: true },
+  scoreRules: {
+    soldOutToEnd: true,
+    oneSizePenalty: -12,
+    lowSizeThreshold: 25,
+    lowSizePenalty: -8,
+    freshDays: 14,
+    freshBonus: 12,
+    recentStartDays: 15,
+    recentEndDays: 30,
+    recentBonus: 6,
+  },
   audit: { revision: 0, versionId: null, lastUpdated: null, lastApplied: null, lastAppliedBy: null },
 };
 
@@ -291,6 +302,30 @@ function normalizeWeights(weights = {}) {
   return normalized;
 }
 
+function scoreRuleNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(parsed)));
+}
+
+function normalizeScoreRules(rules = {}) {
+  const defaults = DEFAULT_STRATEGY.scoreRules;
+  const freshDays = scoreRuleNumber(rules.freshDays, defaults.freshDays, 1, 365);
+  const recentStartDays = scoreRuleNumber(rules.recentStartDays, defaults.recentStartDays, freshDays + 1, 365);
+  const recentEndDays = scoreRuleNumber(rules.recentEndDays, defaults.recentEndDays, recentStartDays, 365);
+  return {
+    soldOutToEnd: rules.soldOutToEnd !== false,
+    oneSizePenalty: scoreRuleNumber(rules.oneSizePenalty, defaults.oneSizePenalty, -100, 0),
+    lowSizeThreshold: scoreRuleNumber(rules.lowSizeThreshold, defaults.lowSizeThreshold, 1, 100),
+    lowSizePenalty: scoreRuleNumber(rules.lowSizePenalty, defaults.lowSizePenalty, -100, 0),
+    freshDays,
+    freshBonus: scoreRuleNumber(rules.freshBonus, defaults.freshBonus, 0, 100),
+    recentStartDays,
+    recentEndDays,
+    recentBonus: scoreRuleNumber(rules.recentBonus, defaults.recentBonus, 0, 100),
+  };
+}
+
 app.use((req, res, next) => {
   if (["/api/storefront-ranking", "/api/analytics-events", "/api/visitor-context"].includes(req.path)) {
     const origin = String(req.headers.origin || "");
@@ -418,6 +453,7 @@ async function loadStrategy(shop, req) {
       ...structuredClone(DEFAULT_STRATEGY),
       ...normalizeStrategyCollections(state.strategy),
       weights: normalizeWeights(state.strategy.weights),
+      scoreRules: normalizeScoreRules(state.strategy.scoreRules),
     };
     return {
       ...memoryStrategy,
@@ -440,6 +476,7 @@ async function loadStrategy(shop, req) {
         ...structuredClone(DEFAULT_STRATEGY),
         ...normalizeStrategyCollections(parsed),
         weights: normalizeWeights(parsed.weights),
+        scoreRules: normalizeScoreRules(parsed.scoreRules),
       };
       await writeState(shop, { strategy: memoryStrategy }).catch(() => {});
       return { ...memoryStrategy, persistence: "shopify_app_metafield_migrated" };
@@ -461,6 +498,7 @@ async function loadPublishedStrategy(shop, req) {
       ...structuredClone(DEFAULT_STRATEGY),
       ...normalizeStrategyCollections(state.publishedStrategy),
       weights: normalizeWeights(state.publishedStrategy.weights),
+      scoreRules: normalizeScoreRules(state.publishedStrategy.scoreRules),
       persistence: "neon_postgres",
     };
   }
@@ -477,6 +515,7 @@ async function saveStrategy(shop, next, req, options = {}) {
     ...structuredClone(DEFAULT_STRATEGY),
     ...normalizeStrategyCollections(strategySnapshot(next)),
     weights: normalizeWeights(next.weights),
+    scoreRules: normalizeScoreRules(next.scoreRules),
     audit: {
       ...previous.audit,
       ...next.audit,
@@ -540,7 +579,7 @@ async function saveStrategy(shop, next, req, options = {}) {
 async function collectionProducts(shop, handle, req, after = null) {
   const data = await gql(
     shop,
-    "query GetCollection($handle:String!,$after:String){collectionByHandle(handle:$handle){id title handle products(first:100,after:$after){nodes{id title handle tags productType createdAt publishedAt totalInventory featuredImage{url altText}priceRangeV2{minVariantPrice{amount currencyCode}}}pageInfo{hasNextPage endCursor}}}}",
+    "query GetCollection($handle:String!,$after:String){collectionByHandle(handle:$handle){id title handle products(first:100,after:$after){nodes{id title handle tags productType createdAt publishedAt totalInventory options{name values} variants(first:100){nodes{availableForSale selectedOptions{name value}}} featuredImage{url altText}priceRangeV2{minVariantPrice{amount currencyCode}}}pageInfo{hasNextPage endCursor}}}}",
     { handle, after },
     req,
   );
@@ -550,6 +589,10 @@ async function collectionProducts(shop, handle, req, after = null) {
     collection: { id: collection.id, title: collection.title, handle: collection.handle },
     products: collection.products.nodes.map((product) => ({
       ...product,
+      variants: (product.variants?.nodes || []).map((variant) => ({
+        availableForSale: Boolean(variant.availableForSale),
+        selectedOptions: variant.selectedOptions || [],
+      })),
       availableForSale: Number(product.totalInventory || 0) > 0,
     })),
     pageInfo: collection.products.pageInfo,
@@ -795,15 +838,42 @@ function countrySalesScore(product, country, sales) {
   };
 }
 
+function productSizeCoverage(product) {
+  const options = Array.isArray(product.options) ? product.options : [];
+  const sizeIndex = options.findIndex((option) => /^(size|talla|tamaño)$/i.test(String(option?.name || "").trim()));
+  if (sizeIndex < 0) return { total: 0, available: 0, percentage: null };
+  const values = Array.isArray(options[sizeIndex]?.values) ? options[sizeIndex].values : [];
+  const totalValues = new Set(values.map((value) => String(value?.name || value || "").trim()).filter(Boolean));
+  const variants = Array.isArray(product.variants) ? product.variants : [];
+  const availableValues = new Set();
+  variants.forEach((variant) => {
+    if (!Boolean(variant.availableForSale ?? variant.available)) return;
+    const selected = Array.isArray(variant.selectedOptions) ? variant.selectedOptions : [];
+    const fromSelected = selected.find((option) => String(option?.name || "").trim().toLowerCase() === String(options[sizeIndex]?.name || "").trim().toLowerCase());
+    const value = fromSelected?.value ?? variant["option" + (sizeIndex + 1)];
+    if (value) availableValues.add(String(value).trim());
+  });
+  const total = totalValues.size || availableValues.size;
+  const available = availableValues.size;
+  return { total, available, percentage: total ? Math.round((available / total) * 100) : null };
+}
+
+function productAgeDays(product) {
+  const value = product.publishedAt || product.createdAt;
+  const timestamp = Date.parse(value || "");
+  return Number.isFinite(timestamp) ? Math.max(0, Math.floor((Date.now() - timestamp) / 86400000)) : null;
+}
+
 function rankProducts(products, context, strategy) {
   const weights = strategy.weights;
+  const scoreRules = normalizeScoreRules(strategy.scoreRules);
   const salesTotals = context.sales?.totals || {};
   const maxSales = Math.max(0, ...Object.values(salesTotals));
   const temperature = Number(context.weather?.temperatureC ?? context.temperatureC ?? 22);
   const country = context.geo?.country || context.country || "ES";
 
   return products
-    .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale)
+    .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale || scoreRules.soldOutToEnd)
     .map((product) => {
       const type = classify(product);
       const thermal = temperatureScore(type, temperature);
@@ -813,7 +883,7 @@ function rankProducts(products, context, strategy) {
       const newness = newnessScore(product);
       const salesUnits = Number(salesTotals[product.id] || 0);
       const recentSales = demandScore(salesUnits, maxSales);
-      const score = Math.round(
+      const baseScore = Math.round(
         (thermal * weights.temperatureFit +
           affinity * weights.countryAffinity +
           recentSales * weights.recentSales +
@@ -821,6 +891,35 @@ function rankProducts(products, context, strategy) {
           availability * weights.availability) /
           100,
       );
+      const sizeCoverage = productSizeCoverage(product);
+      const ageDays = productAgeDays(product);
+      const adjustments = [];
+      if (sizeCoverage.total === 1 && scoreRules.oneSizePenalty) {
+        adjustments.push({ key: "one_size", label: "Una sola talla", points: scoreRules.oneSizePenalty });
+      }
+      if (
+        sizeCoverage.percentage !== null &&
+        sizeCoverage.percentage < scoreRules.lowSizeThreshold &&
+        scoreRules.lowSizePenalty
+      ) {
+        adjustments.push({
+          key: "low_size_coverage",
+          label: "Solo " + sizeCoverage.percentage + "% de tallas disponibles",
+          points: scoreRules.lowSizePenalty,
+        });
+      }
+      if (ageDays !== null && ageDays <= scoreRules.freshDays && scoreRules.freshBonus) {
+        adjustments.push({ key: "fresh", label: "Novedad · " + ageDays + " días", points: scoreRules.freshBonus });
+      } else if (
+        ageDays !== null &&
+        ageDays >= scoreRules.recentStartDays &&
+        ageDays <= scoreRules.recentEndDays &&
+        scoreRules.recentBonus
+      ) {
+        adjustments.push({ key: "recent", label: "Novedad reciente · " + ageDays + " días", points: scoreRules.recentBonus });
+      }
+      const score = baseScore + adjustments.reduce((total, adjustment) => total + adjustment.points, 0);
+      const forcedToEnd = !product.availableForSale && scoreRules.soldOutToEnd;
       const reasons = [
         thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad térmica media",
         countryDemand.localUnits > 0
@@ -828,17 +927,21 @@ function rankProducts(products, context, strategy) {
           : "Demanda global usada como respaldo para " + country,
         salesUnits > 0 ? salesUnits + " uds. vendidas en 30 días" : "Sin ventas recientes registradas",
         newness >= 85 ? "Novedad" : "Producto consolidado",
-        availability ? "Disponible" : "Sin stock",
+        availability ? "Disponible" : forcedToEnd ? "Sin stock · enviado al final" : "Sin stock",
+        ...adjustments.map((adjustment) => adjustment.label + " · " + (adjustment.points > 0 ? "+" : "") + adjustment.points + " pts."),
       ];
       return {
         ...product,
         type,
         score,
-        signals: { thermal, affinity, recentSales, newness, availability, salesUnits, countrySalesUnits: countryDemand.localUnits, countrySalesSource: countryDemand.source },
+        baseScore,
+        adjustments,
+        forcedToEnd,
+        signals: { thermal, affinity, recentSales, newness, availability, salesUnits, countrySalesUnits: countryDemand.localUnits, countrySalesSource: countryDemand.source, sizeCoverage, ageDays },
         reasons,
       };
     })
-    .sort((a, b) => b.score - a.score || (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0));
+    .sort((a, b) => Number(a.forcedToEnd) - Number(b.forcedToEnd) || b.score - a.score || (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0));
 }
 
 function publicProductRanking(product) {
@@ -852,13 +955,17 @@ function publicProductRanking(product) {
     handle: product.handle,
     title: product.title,
     score: product.score,
-    reasons: [product.reasons[0], product.reasons[1], salesBand, product.reasons[3], product.reasons[4]],
+    baseScore: product.baseScore,
+    adjustments: product.adjustments,
+    reasons: [product.reasons[0], product.reasons[1], salesBand, product.reasons[3], product.reasons[4], ...(product.reasons.slice(5) || [])],
     signals: {
       thermal: product.signals.thermal,
       affinity: product.signals.affinity,
       recentSales: product.signals.recentSales,
       newness: product.signals.newness,
       availability: product.signals.availability,
+      sizeCoverage: product.signals.sizeCoverage,
+      ageDays: product.signals.ageDays,
     },
     availableForSale: product.availableForSale,
   };
@@ -2353,7 +2460,7 @@ async function decisionCenter(req, res) {
         priority: "high",
         title: "La estrategia aún está en simulación",
         detail: "Los rankings se calculan pero no se aplican al storefront. Activa Live cuando estés conforme con la configuración.",
-        destination: "strategy",
+        destination: "scores",
       });
     }
     if (!targets.length) {
@@ -2361,7 +2468,7 @@ async function decisionCenter(req, res) {
         priority: "high",
         title: "No hay colecciones objetivo",
         detail: "Añade hasta cuatro colecciones para que la estrategia tenga un ámbito claro.",
-        destination: "strategy",
+        destination: "scores",
       });
     }
     targets.filter((target) => target.status !== "active").forEach((target) => {
@@ -2375,7 +2482,7 @@ async function decisionCenter(req, res) {
         priority: target.status === "grid_not_detected" ? "high" : "medium",
         title: "Revisar “" + target.handle + "”",
         detail: detailByStatus[target.status] || "La integración necesita una comprobación.",
-        destination: "strategy",
+        destination: "scores",
       });
     });
     if (!state?.integrations?.ordersWebhook?.active) {

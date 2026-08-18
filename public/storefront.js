@@ -45,6 +45,29 @@
     return parts[parts.length - 1] === "search";
   }
 
+  function isLikelySearchForm(form) {
+    if (!form) return false;
+    var action = String(form.getAttribute("action") || "").toLowerCase();
+    return action.indexOf("/search") !== -1 || Boolean(form.querySelector('input[name="q"],input[name="query"],input[type="search"]'));
+  }
+
+  function removeResultsPopularTags() {
+    if (!isSearchPage()) return;
+    var containers = document.querySelectorAll(".results-popular");
+    if (!containers.length) return;
+    containers.forEach(function (container) {
+      var tagNodes = Array.from(container.querySelectorAll("*")).filter(function (node) {
+        var classes = String(node.className || "").toLowerCase().split(/\s+/);
+        return classes.some(function (name) {
+          return /(^|-)tag($|-)/.test(name);
+        });
+      });
+      tagNodes.forEach(function (node) {
+        if (node.parentNode) node.parentNode.removeChild(node);
+      });
+    });
+  }
+
   function sendSearch(event, extra) {
     var term = searchTerm();
     if (term.length < 2) return Promise.resolve();
@@ -81,6 +104,7 @@
       var saysNoResults = /no hemos encontrado|sin resultados|no results|no products/.test(text);
       if (!links.length && !saysNoResults && attempts < 5) return window.setTimeout(report, 500);
       document.body.dataset.tpSearchRecorded = "1";
+      removeResultsPopularTags();
       sendSearch("search", { searchResultsCount: links.length });
     }
     window.setTimeout(report, 800);
@@ -105,6 +129,9 @@
   recordSearchPage();
   ["globoFilterRenderSearchCompleted", "shopify:section:load"].forEach(function (eventName) {
     window.addEventListener(eventName, recordSearchPage);
+  });
+  window.addEventListener("shopify:section:load", function () {
+    if (isSearchPage()) removeResultsPopularTags();
   });
 
   if (!collectionPage) return;
@@ -367,13 +394,20 @@
   }
 
   document.addEventListener("submit", function (event) {
-    var form = event.target && event.target.closest('form[action*="/cart/add"]');
+    var form = event.target && event.target.closest("form");
     if (!form) return;
+    if (isLikelySearchForm(form)) window.setTimeout(removeResultsPopularTags, 500);
+    if (!form.matches('form[action*="/cart/add"]')) return;
     var product = form.querySelector('[name="product-id"],[name="id"]');
     sendAddToCart(product && product.value);
   }, true);
 
   document.addEventListener("click", function (event) {
+    var searchButton = event.target && event.target.closest('button[type="submit"],input[type="submit"]');
+    if (searchButton) {
+      var searchForm = searchButton.closest("form");
+      if (isLikelySearchForm(searchForm)) window.setTimeout(removeResultsPopularTags, 500);
+    }
     var button = event.target && event.target.closest('button,[name="add"],[data-add-to-cart]');
     if (!button) return;
     var form = button.closest('form[action*="/cart/add"]');
@@ -420,6 +454,7 @@
       rankingData = null;
       observeGrid();
       scheduleInitialRanking();
+      if (isSearchPage()) removeResultsPopularTags();
     });
   });
 
@@ -451,3 +486,4 @@
   // This script only ranks a fixed batch of product cards after the theme
   // announces that it has finished appending that batch.
 })();
+

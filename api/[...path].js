@@ -53,6 +53,10 @@ const DEFAULT_STRATEGY = {
     recentEndDays: 30,
     recentBonus: 6,
   },
+  manualOverrides: {
+    pins: [],
+    exclusions: [],
+  },
   audit: { revision: 0, versionId: null, lastUpdated: null, lastApplied: null, lastAppliedBy: null },
 };
 
@@ -326,6 +330,34 @@ function normalizeScoreRules(rules = {}) {
   };
 }
 
+function normalizeManualOverrides(overrides = {}) {
+  const normalizeProductRef = (entry, index, kind) => {
+    const id = String(entry?.id || "").trim().slice(0, 180);
+    const handle = String(entry?.handle || "").trim().toLowerCase().slice(0, 120);
+    if (!id && !/^[a-z0-9][a-z0-9-]*$/.test(handle)) return null;
+    const ref = {
+      id,
+      handle: /^[a-z0-9][a-z0-9-]*$/.test(handle) ? handle : "",
+      title: String(entry?.title || "").trim().slice(0, 180),
+      enabled: entry?.enabled !== false,
+      note: String(entry?.note || "").trim().slice(0, 240),
+    };
+    if (kind === "pin") {
+      ref.position = scoreRuleNumber(entry?.position, index + 1, 1, 250);
+    }
+    return ref;
+  };
+  const pins = (Array.isArray(overrides?.pins) ? overrides.pins : [])
+    .map((entry, index) => normalizeProductRef(entry, index, "pin"))
+    .filter(Boolean)
+    .slice(0, 100);
+  const exclusions = (Array.isArray(overrides?.exclusions) ? overrides.exclusions : [])
+    .map((entry, index) => normalizeProductRef(entry, index, "exclude"))
+    .filter(Boolean)
+    .slice(0, 100);
+  return { pins, exclusions };
+}
+
 app.use((req, res, next) => {
   if (["/api/storefront-ranking", "/api/analytics-events", "/api/visitor-context"].includes(req.path)) {
     const origin = String(req.headers.origin || "");
@@ -454,6 +486,7 @@ async function loadStrategy(shop, req) {
       ...normalizeStrategyCollections(state.strategy),
       weights: normalizeWeights(state.strategy.weights),
       scoreRules: normalizeScoreRules(state.strategy.scoreRules),
+      manualOverrides: normalizeManualOverrides(state.strategy.manualOverrides),
     };
     return {
       ...memoryStrategy,
@@ -477,6 +510,7 @@ async function loadStrategy(shop, req) {
         ...normalizeStrategyCollections(parsed),
         weights: normalizeWeights(parsed.weights),
         scoreRules: normalizeScoreRules(parsed.scoreRules),
+        manualOverrides: normalizeManualOverrides(parsed.manualOverrides),
       };
       await writeState(shop, { strategy: memoryStrategy }).catch(() => {});
       return { ...memoryStrategy, persistence: "shopify_app_metafield_migrated" };
@@ -499,6 +533,7 @@ async function loadPublishedStrategy(shop, req) {
       ...normalizeStrategyCollections(state.publishedStrategy),
       weights: normalizeWeights(state.publishedStrategy.weights),
       scoreRules: normalizeScoreRules(state.publishedStrategy.scoreRules),
+      manualOverrides: normalizeManualOverrides(state.publishedStrategy.manualOverrides),
       persistence: "neon_postgres",
     };
   }
@@ -516,6 +551,7 @@ async function saveStrategy(shop, next, req, options = {}) {
     ...normalizeStrategyCollections(strategySnapshot(next)),
     weights: normalizeWeights(next.weights),
     scoreRules: normalizeScoreRules(next.scoreRules),
+    manualOverrides: normalizeManualOverrides(next.manualOverrides),
     audit: {
       ...previous.audit,
       ...next.audit,
@@ -864,16 +900,28 @@ function productAgeDays(product) {
   return Number.isFinite(timestamp) ? Math.max(0, Math.floor((Date.now() - timestamp) / 86400000)) : null;
 }
 
+function manualOverrideMatches(product, ref) {
+  const id = String(product?.id || "");
+  const handle = String(product?.handle || "").toLowerCase();
+  return Boolean(ref?.enabled !== false && ((ref.id && ref.id === id) || (ref.handle && ref.handle === handle)));
+}
+
 function rankProducts(products, context, strategy) {
   const weights = strategy.weights;
   const scoreRules = normalizeScoreRules(strategy.scoreRules);
+  const manualOverrides = normalizeManualOverrides(strategy.manualOverrides);
   const salesTotals = context.sales?.totals || {};
   const maxSales = Math.max(0, ...Object.values(salesTotals));
   const temperature = Number(context.weather?.temperatureC ?? context.temperatureC ?? 22);
   const country = context.geo?.country || context.country || "ES";
+  const pinRefs = manualOverrides.pins.filter((ref) => ref.enabled !== false);
+  const exclusionRefs = manualOverrides.exclusions.filter((ref) => ref.enabled !== false);
+  const hasManualOverride = (product) =>
+    pinRefs.some((ref) => manualOverrideMatches(product, ref)) ||
+    exclusionRefs.some((ref) => manualOverrideMatches(product, ref));
 
-  return products
-    .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale || scoreRules.soldOutToEnd)
+  const scored = products
+    .filter((product) => !strategy.exclusions.excludeOutOfStock || product.availableForSale || scoreRules.soldOutToEnd || hasManualOverride(product))
     .map((product) => {
       const type = classify(product);
       const thermal = temperatureScore(type, temperature);
@@ -918,8 +966,10 @@ function rankProducts(products, context, strategy) {
       ) {
         adjustments.push({ key: "recent", label: "Novedad reciente · " + ageDays + " días", points: scoreRules.recentBonus });
       }
+      const pin = pinRefs.find((ref) => manualOverrideMatches(product, ref));
+      const manuallyExcluded = exclusionRefs.some((ref) => manualOverrideMatches(product, ref));
       const score = baseScore + adjustments.reduce((total, adjustment) => total + adjustment.points, 0);
-      const forcedToEnd = !product.availableForSale && scoreRules.soldOutToEnd;
+      const forcedToEnd = manuallyExcluded || (!product.availableForSale && scoreRules.soldOutToEnd);
       const reasons = [
         thermal >= 85 ? "Temperatura real favorable" : "Compatibilidad térmica media",
         countryDemand.localUnits > 0
@@ -929,6 +979,8 @@ function rankProducts(products, context, strategy) {
         newness >= 85 ? "Novedad" : "Producto consolidado",
         availability ? "Disponible" : forcedToEnd ? "Sin stock · enviado al final" : "Sin stock",
         ...adjustments.map((adjustment) => adjustment.label + " · " + (adjustment.points > 0 ? "+" : "") + adjustment.points + " pts."),
+        ...(pin ? ["Fijado manualmente · posición #" + pin.position] : []),
+        ...(manuallyExcluded ? ["Excluido de la priorización · enviado al final"] : []),
       ];
       return {
         ...product,
@@ -937,11 +989,35 @@ function rankProducts(products, context, strategy) {
         baseScore,
         adjustments,
         forcedToEnd,
+        pinnedPosition: pin?.position || null,
+        excludedFromAlgorithm: manuallyExcluded,
         signals: { thermal, affinity, recentSales, newness, availability, salesUnits, countrySalesUnits: countryDemand.localUnits, countrySalesSource: countryDemand.source, sizeCoverage, ageDays },
         reasons,
       };
-    })
-    .sort((a, b) => Number(a.forcedToEnd) - Number(b.forcedToEnd) || b.score - a.score || (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0));
+    });
+
+  const compareUnpinned = (a, b) =>
+    Number(a.excludedFromAlgorithm) - Number(b.excludedFromAlgorithm) ||
+    Number(a.forcedToEnd) - Number(b.forcedToEnd) ||
+    b.score - a.score ||
+    (b.signals.salesUnits || 0) - (a.signals.salesUnits || 0);
+  const pinned = scored.filter((product) => product.pinnedPosition).sort((a, b) => a.pinnedPosition - b.pinnedPosition);
+  const unpinned = scored.filter((product) => !product.pinnedPosition).sort(compareUnpinned);
+  const ranked = [];
+  const occupied = new Set();
+  pinned.forEach((product) => {
+    let index = Math.min(Math.max(0, product.pinnedPosition - 1), Math.max(0, scored.length - 1));
+    while (occupied.has(index) && index < scored.length - 1) index += 1;
+    occupied.add(index);
+    ranked[index] = product;
+  });
+  let nextIndex = 0;
+  unpinned.forEach((product) => {
+    while (occupied.has(nextIndex)) nextIndex += 1;
+    ranked[nextIndex] = product;
+    occupied.add(nextIndex);
+  });
+  return ranked.filter(Boolean);
 }
 
 function publicProductRanking(product) {
@@ -957,6 +1033,8 @@ function publicProductRanking(product) {
     score: product.score,
     baseScore: product.baseScore,
     adjustments: product.adjustments,
+    pinnedPosition: product.pinnedPosition || null,
+    excludedFromAlgorithm: product.excludedFromAlgorithm === true,
     reasons: [product.reasons[0], product.reasons[1], salesBand, product.reasons[3], product.reasons[4], ...(product.reasons.slice(5) || [])],
     signals: {
       thermal: product.signals.thermal,

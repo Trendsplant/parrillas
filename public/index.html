@@ -58,15 +58,21 @@ main{max-width:1440px;margin:0 auto;padding:42px}.hero{display:flex;align-items:
 <header class="app-header">
   <div class="topbar">
     <div class="brand"><div class="brand-mark">G</div><div>GESTPLANT<small>OPERATIONS PLATFORM</small></div></div>
+    <nav class="nav-shell" aria-label="Navegación principal">
+      <details class="nav-menu nav-menu-parrillas">
+        <summary><span class="nav-menu-icon">◈</span><span>Parrillas</span><span class="nav-chevron" aria-hidden="true">⌄</span></summary>
+        <div class="nav-popover nav-popover-wide"><div class="nav-popover-head"><strong>Parrillas</strong><span>Ordenación, señales e inteligencia comercial</span></div><div class="nav"><a class="active" data-view="overview" href="#overview"><span class="nav-icon">◈</span>Overview</a><a data-view="scores" href="#scoreManagerPanel"><span class="nav-icon">±</span>Scores</a><a data-view="overrides" href="#manualOverridesPanel"><span class="nav-icon">⚑</span>Prioridades</a><a data-view="analytics" href="#analytics"><span class="nav-icon">◌</span>Analytics</a><a data-view="searches" href="#searchInsightsPanel"><span class="nav-icon">⌕</span>Búsquedas</a><a data-view="visitors" href="#liveVisitorsPanel"><span class="nav-icon">◉</span>Visitantes</a><a data-view="decisions" href="#decisionCenterPanel"><span class="nav-icon">✦</span>Decisiones</a><a data-view="recommendations" href="#recommendationsPanel"><span class="nav-icon">✺</span>Recomendaciones</a><a data-view="audit" href="#controlPanel"><span class="nav-icon">◷</span>Auditoría</a></div></div>
+      </details>
+      <details class="nav-menu nav-menu-apps">
+        <summary><span class="nav-menu-icon">◇</span><span>Apps</span><span class="nav-chevron" aria-hidden="true">⌄</span></summary>
+        <div class="nav-popover"><div class="nav-popover-head"><strong>Apps</strong><span>Herramientas independientes</span></div><div class="nav"><a data-view="discounts" href="#discountsPanel"><span class="nav-icon">%</span>Descuentos</a></div></div>
+      </details>
+      <details class="nav-menu nav-menu-system">
+        <summary><span class="nav-menu-icon">⚙</span><span>Sistema</span><span class="nav-chevron" aria-hidden="true">⌄</span></summary>
+        <div class="nav-popover"><div class="nav-popover-head"><strong>Sistema</strong><span>Publicación y configuración</span></div><div class="nav"><a data-view="release" href="#themeReleasePanel"><span class="nav-icon">⇧</span>Publicar</a><a data-view="preferences" href="#preferences"><span class="nav-icon">⚙</span>Ajustes</a><a data-view="documentation" href="https://shopify.dev/docs/apps" target="_blank" rel="noreferrer"><span class="nav-icon">?</span>Documentación</a></div></div>
+      </details>
+    </nav>
     <div class="topbar-context"><div class="crumb">Workspace <span>/</span> <strong id="workspaceTitle">Parrillas</strong></div><div class="top-actions"><span class="status-pill workspace-status"><span class="live-pulse"></span>Live workspace</span><span class="avatar">TR</span></div></div>
-  </div>
-  <div class="nav-shell" aria-label="Navegación principal">
-    <div class="nav-group"><div class="nav-label">Parrillas</div><nav class="nav"><a class="active" data-view="overview" href="#overview"><span class="nav-icon">◈</span>Overview</a><a data-view="scores" href="#scoreManagerPanel"><span class="nav-icon">±</span>Scores</a><a data-view="overrides" href="#manualOverridesPanel"><span class="nav-icon">⚑</span>Prioridades</a><a data-view="collections" href="#collections"><span class="nav-icon">◫</span>Collections</a><a data-view="analytics" href="#analytics"><span class="nav-icon">◌</span>Analytics</a><a data-view="searches" href="#searchInsightsPanel"><span class="nav-icon">⌕</span>Búsquedas</a><a data-view="visitors" href="#liveVisitorsPanel"><span class="nav-icon">◉</span>Visitantes</a><a data-view="decisions" href="#decisionCenterPanel"><span class="nav-icon">✦</span>Decisiones</a><a data-view="recommendations" href="#recommendationsPanel"><span class="nav-icon">✺</span>Recomendaciones</a><a data-view="audit" href="#controlPanel"><span class="nav-icon">◷</span>Auditoría</a></nav></div>
-    <div class="nav-divider" aria-hidden="true"></div>
-    <div class="nav-group nav-group-apps"><div class="nav-label">Apps</div><nav class="nav"><a data-view="discounts" href="#discountsPanel"><span class="nav-icon">%</span>Descuentos</a></nav></div>
-    <div class="nav-divider" aria-hidden="true"></div>
-    <div class="nav-group nav-group-config"><div class="nav-label">Sistema</div><nav class="nav"><a data-view="release" href="#themeReleasePanel"><span class="nav-icon">⇧</span>Publicar</a><a data-view="preferences" href="#preferences"><span class="nav-icon">⚙</span>Ajustes</a><a data-view="documentation" href="https://shopify.dev/docs/apps" target="_blank" rel="noreferrer"><span class="nav-icon">?</span>Docs</a></nav></div>
-    <div class="connection-pill"><span class="store-dot"></span><span>Shopify</span></div>
   </div>
 </header>
 <div class="content">
@@ -216,6 +222,16 @@ document.getElementById("refreshIntegrationHealth").addEventListener("click", fu
   $("summerDisableProduction").addEventListener("click",async function(){var button=this;if(button.dataset.confirm!=="true"){button.dataset.confirm="true";button.textContent="Confirmar cancelación";summerMessage("summerProductionMessage","Pulsa Confirmar cancelación para eliminar de Shopify los tres descuentos de Summer Day.","pending");window.setTimeout(function(){if(button.dataset.confirm==="true"){delete button.dataset.confirm;button.textContent="Cancelar campaña"}},10000);return}delete button.dataset.confirm;summerMessage("summerProductionMessage","Retirando la campaña…","pending");try{await summerPost("/api/discounts/summer-day/disable",{},button,"Cancelando…");await summerLoadStatus()}catch(error){summerMessage("summerProductionMessage","Error: "+error.message,"error")}});
   var summerBaseSetWorkspaceView=setWorkspaceView;setWorkspaceView=function(view){if(view==="discounts"){window.clearTimeout(liveVisitorsTimer);document.querySelector("main").dataset.view="discounts";$("workspaceTitle").textContent="Descuentos";window.scrollTo({top:0,behavior:"smooth"});summerLoadStatus();return}return summerBaseSetWorkspaceView(view)};
   document.querySelectorAll('.nav a[data-view="discounts"]').forEach(function(link){link.addEventListener("click",summerLoadStatus)});
+})();
+</script>
+<script>
+(function(){
+  var menus=Array.from(document.querySelectorAll(".nav-menu"));
+  function closeMenus(except){menus.forEach(function(menu){if(menu!==except)menu.removeAttribute("open")})}
+  menus.forEach(function(menu){menu.addEventListener("toggle",function(){if(menu.open)closeMenus(menu)})});
+  document.addEventListener("click",function(event){if(!event.target.closest(".nav-menu"))closeMenus()});
+  document.addEventListener("keydown",function(event){if(event.key==="Escape")closeMenus()});
+  document.querySelectorAll(".nav-menu .nav a").forEach(function(link){link.addEventListener("click",function(){closeMenus()})});
 })();
 </script>
 </body></html>

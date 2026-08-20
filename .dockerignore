@@ -1,0 +1,8 @@
+.git
+.github
+.env*
+!.env.example
+backups
+node_modules
+npm-debug.log*
+

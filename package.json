@@ -3,12 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check api/[...path].js"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.0.1",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "postgres": "^3.4.7"
   }
 }
+

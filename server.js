@@ -30,9 +30,14 @@ server.use(apiApp);
 const listener = server.listen(port, "0.0.0.0", () => {
   console.log(`Parrillas escuchando en el puerto ${port}`);
 });
+const summerDayMaintenance = setInterval(() => {
+  fetch(`http://127.0.0.1:${port}/api/discounts/summer-day/storefront`).catch(() => {});
+}, 60_000);
+summerDayMaintenance.unref();
 
 function shutdown(signal) {
   console.log(`${signal}: cerrando Parrillas`);
+  clearInterval(summerDayMaintenance);
   listener.close((error) => {
     process.exit(error ? 1 : 0);
   });
@@ -41,4 +46,3 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-

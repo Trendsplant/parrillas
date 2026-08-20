@@ -33,7 +33,7 @@
     if (document.getElementById("gestplant-summer-style")) return;
     var style = document.createElement("style");
     style.id = "gestplant-summer-style";
-    style.textContent = ".gestplant-summer{margin:12px 0;padding:13px 14px;border:1px solid #d8e6de;border-left:4px solid #134838;border-radius:4px;background:#f4f8f5;color:#123b30;font-family:inherit}.gestplant-summer__label{display:block;font-size:11px;font-weight:900;letter-spacing:.14em;text-transform:uppercase}.gestplant-summer__price{display:flex;align-items:baseline;gap:9px;margin-top:6px}.gestplant-summer__price strong{font-size:24px;line-height:1}.gestplant-summer__price del{font-size:13px;opacity:.65}.gestplant-summer__ends{display:block;margin-top:7px;font-size:11px;opacity:.8}.gestplant-summer-badge{position:absolute;z-index:3;top:9px;left:9px;padding:6px 8px;border-radius:3px;background:#123f32;color:#fff;font:800 10px/1.1 inherit;letter-spacing:.08em;text-transform:uppercase;pointer-events:none}.gestplant-summer-card{position:relative}.gestplant-summer[hidden],.gestplant-summer-badge[hidden]{display:none!important}";
+    style.textContent = ".gestplant-summer{margin:12px 0;padding:13px 14px;border:1px solid #d8e6de;border-left:4px solid #134838;border-radius:4px;background:#f4f8f5;color:#123b30;font-family:inherit}.gestplant-summer__label{display:block;font-size:11px;font-weight:900;letter-spacing:.14em;text-transform:uppercase}.gestplant-summer__price{display:flex;align-items:baseline;gap:9px;margin-top:6px}.gestplant-summer__price strong{font-size:24px;line-height:1}.gestplant-summer__price del{font-size:13px;opacity:.65}.gestplant-summer__ends{display:block;margin-top:7px;font-size:11px;opacity:.8}.gestplant-summer-badge{position:absolute;z-index:3;top:9px;left:9px;padding:6px 8px;border-radius:3px;background:#123f32;color:#fff;font:800 10px/1.1 inherit;letter-spacing:.08em;text-transform:uppercase;pointer-events:none}.gestplant-summer-card{position:relative}.gestplant-summer-pdp-active .product__price-and-badge>.product__price,.gestplant-summer-pdp-active .product__newsletter-offer{display:none!important}.gestplant-summer[hidden],.gestplant-summer-badge[hidden]{display:none!important}";
     document.head.appendChild(style);
   }
 
@@ -67,6 +67,7 @@
     }
     box.hidden = false;
     box.innerHTML = '<span class="gestplant-summer__label">ONLY TODAY · -' + productRule.discountPercent + '% FROM ORIGINAL PRICE</span><div class="gestplant-summer__price"><strong>' + money(discounted) + '</strong><del>' + money(original) + '</del></div><span class="gestplant-summer__ends" id="gestplant-summer-countdown"></span>';
+    document.documentElement.classList.add("gestplant-summer-pdp-active");
     updateCountdown();
   }
 
@@ -97,6 +98,7 @@
   }
 
   function clearCampaignUi() {
+    document.documentElement.classList.remove("gestplant-summer-pdp-active");
     document.querySelectorAll(".gestplant-summer,.gestplant-summer-badge").forEach(function (node) { node.remove(); });
     document.querySelectorAll(".gestplant-summer-card").forEach(function (node) { node.classList.remove("gestplant-summer-card"); });
   }
@@ -145,3 +147,4 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", refresh, { once: true });
   else refresh();
 })();
+

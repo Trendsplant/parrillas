@@ -53,8 +53,11 @@
     if (!anchor) return;
     var variant = chosenVariant(product);
     if (!variant) return;
-    var original = Number(variant.price || 0);
-    var discounted = Math.round(original * (1 - Number(productRule.discountPercent) / 100));
+    var current = Number(variant.price || 0);
+    var compareAt = Number(variant.compare_at_price || 0);
+    var original = compareAt > current ? compareAt : current;
+    var summerTarget = Math.round(original * (1 - Number(productRule.discountPercent) / 100));
+    var discounted = Math.min(current, summerTarget);
     var box = document.getElementById("gestplant-summer-pdp");
     if (!box) {
       box = document.createElement("div");
@@ -63,7 +66,7 @@
       anchor.insertAdjacentElement("afterend", box);
     }
     box.hidden = false;
-    box.innerHTML = '<span class="gestplant-summer__label">ONLY TODAY · -' + productRule.discountPercent + '%</span><div class="gestplant-summer__price"><strong>' + money(discounted) + '</strong><del>' + money(original) + '</del></div><span class="gestplant-summer__ends" id="gestplant-summer-countdown"></span>';
+    box.innerHTML = '<span class="gestplant-summer__label">ONLY TODAY · -' + productRule.discountPercent + '% FROM ORIGINAL PRICE</span><div class="gestplant-summer__price"><strong>' + money(discounted) + '</strong><del>' + money(original) + '</del></div><span class="gestplant-summer__ends" id="gestplant-summer-countdown"></span>';
     updateCountdown();
   }
 
@@ -142,4 +145,3 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", refresh, { once: true });
   else refresh();
 })();
-

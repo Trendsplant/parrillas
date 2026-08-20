@@ -40,6 +40,15 @@ const SUMMER_DAY_MANIFEST = JSON.parse(
 );
 const SUMMER_DAY_PERCENTAGES = [40, 50, 60];
 const SUMMER_DAY_TEST_MAX_MINUTES = 120;
+const SUMMER_DAY_SUPERSEDED_DISCOUNTS = [
+  { id: "gid://shopify/DiscountAutomaticNode/1684050936140", title: "Essential men x3 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/1684051034444", title: "Essential men x5 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/1684056211788", title: "Essential women x3 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/1684056277324", title: "Essential women x5 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/2275052618060", title: "Swimwear x2 Bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/2275052945740", title: "Swimwear x3 Bundle" },
+];
+const summerCleanupPromises = new Map();
 
 const DEFAULT_STRATEGY = {
   enabled: true,
@@ -588,6 +597,28 @@ function chunks(values, size) {
   return output;
 }
 
+function summerProductPricePlan(variants, discountPercent) {
+  const rows = (variants || []).map((variant) => {
+    const currentCents = Math.round(Number(variant.price || 0) * 100);
+    const compareAtCents = Math.round(Number(variant.compareAtPrice || 0) * 100);
+    const originalCents = compareAtCents > currentCents ? compareAtCents : currentCents;
+    const targetCents = Math.round(originalCents * (100 - discountPercent) / 100);
+    const requiredCents = Math.max(0, currentCents - targetCents);
+    const fraction = currentCents > 0 && requiredCents > 0 ? (requiredCents / currentCents).toFixed(12) : null;
+    return { variantId: variant.id, sku: variant.sku, currentCents, originalCents, targetCents, requiredCents, fraction };
+  });
+  const fractions = [...new Set(rows.map((row) => row.fraction).filter(Boolean))];
+  const noDiscountVariants = rows.filter((row) => row.requiredCents === 0).length;
+  return {
+    ok: rows.length > 0 && fractions.length <= 1 && (noDiscountVariants === 0 || noDiscountVariants === rows.length),
+    discountRequired: fractions.length === 1,
+    effectiveFraction: fractions[0] || null,
+    effectivePercent: fractions[0] ? Math.round(Number(fractions[0]) * 1_000_000) / 10_000 : 0,
+    variants: rows.length,
+    variantsAlreadyAtOrBelowTarget: noDiscountVariants,
+  };
+}
+
 async function resolveSummerProducts(shop, req) {
   const variants = [];
   for (const group of chunks(SUMMER_DAY_MANIFEST.products, 15)) {
@@ -597,7 +628,7 @@ async function resolveSummerProducts(shop, req) {
     const query = group.map((product) => "sku:" + product.sku + "*").join(" OR ");
     const data = await gql(
       shop,
-      `query SummerVariants($query:String!){productVariants(first:250,query:$query){nodes{id sku product{id legacyResourceId title handle status featuredMedia{preview{image{url}}}}}}}`,
+      `query SummerVariants($query:String!){productVariants(first:250,query:$query){nodes{id sku price compareAtPrice product{id legacyResourceId title handle status featuredMedia{preview{image{url}}}}}}}`,
       { query },
       req,
     );
@@ -624,6 +655,7 @@ async function resolveSummerProducts(shop, req) {
       continue;
     }
     const product = products[0];
+    const pricePlan = summerProductPricePlan(matchingVariants, item.discountPercent);
     resolved.push({
       sku: item.sku,
       expectedTitle: item.title,
@@ -634,6 +666,7 @@ async function resolveSummerProducts(shop, req) {
       handle: product.handle,
       status: product.status,
       image: product.featuredMedia?.preview?.image?.url || null,
+      pricePlan,
     });
   }
   const duplicateProducts = Object.entries(
@@ -644,35 +677,37 @@ async function resolveSummerProducts(shop, req) {
   )
     .filter(([, products]) => products.length > 1)
     .map(([productId, products]) => ({ productId, skus: products.map((product) => product.sku) }));
+  const inconsistentPricing = resolved
+    .filter((product) => !product.pricePlan.ok)
+    .map((product) => ({ sku: product.sku, productId: product.productId, pricePlan: product.pricePlan }));
+  const pricingGroups = [...new Set(resolved.map((product) => product.pricePlan.effectiveFraction).filter(Boolean))];
   return {
-    ok: missing.length === 0 && ambiguous.length === 0 && duplicateProducts.length === 0,
+    ok: missing.length === 0 && ambiguous.length === 0 && duplicateProducts.length === 0 && inconsistentPricing.length === 0,
     checkedAt: new Date().toISOString(),
     total: SUMMER_DAY_MANIFEST.products.length,
     resolved,
     missing,
     ambiguous,
     duplicateProducts,
+    inconsistentPricing,
+    pricingGroups,
   };
 }
 
-function discountInput({ title, percentage, productIds, startsAt, endsAt }) {
+function summerBasicDiscountInput({ title, effectiveFraction, productIds, startsAt, endsAt }) {
   return {
     title,
     startsAt,
     endsAt,
     customerGets: {
-      value: { percentage: percentage / 100 },
+      value: { percentage: Number(effectiveFraction) },
       items: { products: { productsToAdd: [...new Set(productIds)] } },
     },
-    combinesWith: {
-      productDiscounts: true,
-      orderDiscounts: false,
-      shippingDiscounts: true,
-    },
+    combinesWith: { productDiscounts: false, orderDiscounts: false, shippingDiscounts: false },
   };
 }
 
-async function createAutomaticProductDiscount(shop, req, input) {
+async function createSummerBasicDiscount(shop, req, input) {
   const data = await gql(
     shop,
     `mutation CreateSummerDiscount($input:DiscountAutomaticBasicInput!){discountAutomaticBasicCreate(automaticBasicDiscount:$input){automaticDiscountNode{id automaticDiscount{... on DiscountAutomaticBasic{title status startsAt endsAt}}}userErrors{field code message}}}`,
@@ -707,22 +742,95 @@ async function deleteAutomaticDiscount(shop, req, id) {
   if (errors.length) throw new Error(errors.map((item) => item.message).join("; "));
 }
 
+async function updateAutomaticBasicWindow(shop, req, id, input) {
+  const data = await gql(
+    shop,
+    `mutation UpdateSummerSuperseded($id:ID!,$input:DiscountAutomaticBasicInput!){discountAutomaticBasicUpdate(id:$id,automaticBasicDiscount:$input){automaticDiscountNode{id automaticDiscount{... on DiscountAutomaticBasic{title status startsAt endsAt}}}userErrors{field code message}}}`,
+    { id, input },
+    req,
+  );
+  const result = data.discountAutomaticBasicUpdate;
+  if (result.userErrors?.length) throw new Error(result.userErrors.map((item) => item.message).join("; "));
+  return { id: result.automaticDiscountNode?.id || id, ...(result.automaticDiscountNode?.automaticDiscount || {}) };
+}
+
+async function pauseSupersededDiscounts(shop, req) {
+  const paused = [];
+  try {
+    for (const discount of SUMMER_DAY_SUPERSEDED_DISCOUNTS) {
+      const updated = await updateAutomaticBasicWindow(shop, req, discount.id, { endsAt: SUMMER_DAY_MANIFEST.startsAt });
+      paused.push({ ...discount, ...updated });
+    }
+    return paused;
+  } catch (error) {
+    await Promise.allSettled(paused.map((discount) => updateAutomaticBasicWindow(shop, req, discount.id, { endsAt: null })));
+    throw error;
+  }
+}
+
+async function restoreSupersededDiscounts(shop, req, discounts = SUMMER_DAY_SUPERSEDED_DISCOUNTS) {
+  const results = await Promise.allSettled(
+    discounts.map((discount) => updateAutomaticBasicWindow(shop, req, discount.id, { endsAt: null })),
+  );
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length) throw new Error("No se pudieron reactivar todos los bundles sustituidos por Summer Day.");
+  return results.map((result) => result.value);
+}
+
 async function summerDiscountNodes(shop, req, ids) {
   const uniqueIds = [...new Set((ids || []).filter(Boolean))];
   if (!uniqueIds.length) return [];
   const data = await gql(
     shop,
-    `query SummerDiscountNodes($ids:[ID!]!){nodes(ids:$ids){... on DiscountAutomaticNode{id automaticDiscount{... on DiscountAutomaticBasic{title status startsAt endsAt combinesWith{productDiscounts orderDiscounts shippingDiscounts}}}}}}`,
+    `query SummerDiscountNodes($ids:[ID!]!){nodes(ids:$ids){... on DiscountAutomaticNode{id automaticDiscount{__typename ... on DiscountAutomaticBasic{title status startsAt endsAt combinesWith{productDiscounts orderDiscounts shippingDiscounts}} ... on DiscountAutomaticApp{title status startsAt endsAt combinesWith{productDiscounts orderDiscounts shippingDiscounts} appDiscountType{functionId}}}}}}`,
     { ids: uniqueIds },
     req,
   );
   return (data.nodes || []).filter(Boolean).map((node) => ({ id: node.id, ...(node.automaticDiscount || {}) }));
 }
 
+async function cleanupExpiredSummerDay(shop, req) {
+  const initial = await readState(shop);
+  const now = Date.now();
+  const testExpired = initial?.summerDay?.test?.enabled && now >= Date.parse(initial.summerDay.test.endsAt || 0);
+  const productionExpired = initial?.summerDay?.production?.enabled && now >= Date.parse(initial.summerDay.production.endsAt || 0);
+  if (!testExpired && !productionExpired) return initial;
+  if (summerCleanupPromises.has(shop)) return summerCleanupPromises.get(shop);
+
+  const cleanup = (async () => {
+    const current = await readState(shop);
+    const summerDay = current?.summerDay || {};
+    let nextTest = summerDay.test;
+    let nextProduction = summerDay.production;
+    if (nextTest?.enabled && Date.now() >= Date.parse(nextTest.endsAt || 0)) {
+      if (nextTest.discount?.id) await deleteAutomaticDiscount(shop, req, nextTest.discount.id).catch(() => {});
+      nextTest = { ...nextTest, enabled: false, status: "expired", discount: null, disabledAt: new Date().toISOString() };
+    }
+    if (nextProduction?.enabled && Date.now() >= Date.parse(nextProduction.endsAt || 0)) {
+      await Promise.allSettled((nextProduction.discounts || []).map((discount) => deleteAutomaticDiscount(shop, req, discount.id)));
+      await restoreSupersededDiscounts(shop, req, nextProduction.pausedDiscounts);
+      nextProduction = {
+        ...nextProduction,
+        enabled: false,
+        status: "completed",
+        discounts: [],
+        pausedDiscounts: [],
+        disabledAt: new Date().toISOString(),
+      };
+    }
+    return updateState(shop, (latest) => ({
+      ...latest,
+      summerDay: { ...(latest.summerDay || {}), test: nextTest, production: nextProduction },
+    }));
+  })().finally(() => summerCleanupPromises.delete(shop));
+  summerCleanupPromises.set(shop, cleanup);
+  return cleanup;
+}
+
 async function summerStatus(req, res) {
   try {
     const shop = shopOf(req);
-    const state = await readState(shop);
+    const state = await cleanupExpiredSummerDay(shop, req);
     const summerDay = state?.summerDay || {};
     const ids = [
       summerDay.test?.discount?.id,
@@ -765,7 +873,7 @@ async function searchSummerProducts(req, res) {
     if (query.length < 2) return res.json({ products: [] });
     const data = await gql(
       shopOf(req),
-      `query SearchSummerProducts($query:String!){products(first:20,query:$query){nodes{id legacyResourceId title handle status featuredMedia{preview{image{url}}}variants(first:10){nodes{id title sku price}}}}}`,
+      `query SearchSummerProducts($query:String!){products(first:20,query:$query){nodes{id legacyResourceId title handle status tags featuredMedia{preview{image{url}}}variants(first:10){nodes{id title sku price compareAtPrice}}}}}`,
       { query },
       req,
     );
@@ -788,26 +896,30 @@ async function enableSummerTest(req, res) {
     if (state?.summerDay?.test?.discount?.id) {
       return res.status(409).json({ error: "Ya existe una prueba activa. Desactívala antes de crear otra." });
     }
+    if (state?.summerDay?.production?.enabled) {
+      return res.status(409).json({ error: "Cancela la campaña programada antes de iniciar una prueba." });
+    }
     const productData = await gql(
       shop,
-      `query SummerTestProduct($id:ID!){product(id:$id){id legacyResourceId title handle status featuredMedia{preview{image{url}}}}}`,
+      `query SummerTestProduct($id:ID!){product(id:$id){id legacyResourceId title handle status featuredMedia{preview{image{url}}}variants(first:250){nodes{id sku price compareAtPrice}}}}`,
       { id: productId },
       req,
     );
     if (!productData.product) return res.status(404).json({ error: "Producto no encontrado." });
+    const pricePlan = summerProductPricePlan(productData.product.variants?.nodes || [], percentage);
+    if (!pricePlan.ok) return res.status(409).json({ error: "Las variantes del producto no comparten una regla de precio segura." });
+    if (!pricePlan.discountRequired) {
+      return res.status(409).json({ error: "El precio vigente ya es igual o mejor que el objetivo elegido; no hace falta añadir otro descuento." });
+    }
     const startsAt = new Date(Date.now() - 30_000).toISOString();
     const endsAt = new Date(Date.now() + durationMinutes * 60_000).toISOString();
-    created = await createAutomaticProductDiscount(
-      shop,
-      req,
-      discountInput({
-        title: `GESTPLANT · SUMMER DAY TEST · ${percentage}%`,
-        percentage,
-        productIds: [productId],
-        startsAt,
-        endsAt,
-      }),
-    );
+    created = await createSummerBasicDiscount(shop, req, summerBasicDiscountInput({
+      title: `GESTPLANT · SUMMER DAY TEST · ${percentage}% DESDE ORIGINAL`,
+      effectiveFraction: pricePlan.effectiveFraction,
+      productIds: [productId],
+      startsAt,
+      endsAt,
+    }));
     const test = {
       enabled: true,
       percentage,
@@ -821,6 +933,7 @@ async function enableSummerTest(req, res) {
         image: productData.product.featuredMedia?.preview?.image?.url || null,
       },
       discount: created,
+      pricePlan,
       activatedAt: new Date().toISOString(),
     };
     await updateState(shop, (current) => ({
@@ -856,15 +969,16 @@ async function disableSummerTest(req, res) {
 async function publishSummerDay(req, res) {
   const shop = shopOf(req);
   const created = [];
+  let pausedDiscounts = [];
   try {
     let state = await readState(shop);
     if (state?.summerDay?.production?.discounts?.some((discount) => discount.id)) {
       return res.status(409).json({ error: "Summer Day ya está programado. Cancélalo antes de reemplazarlo." });
     }
-    let validation = state?.summerDay?.validation;
-    if (!validation?.ok || Date.now() - Date.parse(validation.checkedAt || 0) > 30 * 60 * 1000) {
-      validation = await resolveSummerProducts(shop, req);
+    if (state?.summerDay?.test?.enabled) {
+      return res.status(409).json({ error: "Desactiva la prueba antes de programar la campaña completa." });
     }
+    const validation = await resolveSummerProducts(shop, req);
     if (!validation.ok || validation.resolved.length !== SUMMER_DAY_MANIFEST.products.length) {
       await updateState(shop, (current) => ({
         ...current,
@@ -872,22 +986,27 @@ async function publishSummerDay(req, res) {
       }));
       return res.status(409).json({ error: "La validación del catálogo no está completa.", validation });
     }
-    for (const percentage of [60, 50, 40]) {
-      const productIds = validation.resolved
-        .filter((product) => product.discountPercent === percentage)
-        .map((product) => product.productId);
-      const discount = await createAutomaticProductDiscount(
-        shop,
-        req,
-        discountInput({
-          title: `SUMMER DAY · ${percentage}% ONLY TODAY`,
-          percentage,
-          productIds,
-          startsAt: SUMMER_DAY_MANIFEST.startsAt,
-          endsAt: SUMMER_DAY_MANIFEST.endsAt,
-        }),
-      );
-      created.push({ percentage, productCount: productIds.length, ...discount });
+    const groups = validation.pricingGroups.map((effectiveFraction) => ({
+      effectiveFraction,
+      products: validation.resolved.filter((product) => product.pricePlan.effectiveFraction === effectiveFraction),
+    }));
+    pausedDiscounts = await pauseSupersededDiscounts(shop, req);
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = groups[index];
+      const assignedRates = [...new Set(group.products.map((product) => product.discountPercent))].sort().join("/");
+      const discount = await createSummerBasicDiscount(shop, req, summerBasicDiscountInput({
+        title: `SUMMER DAY · ORIGINAL ${assignedRates}% · ${index + 1}/${groups.length}`,
+        effectiveFraction: group.effectiveFraction,
+        productIds: group.products.map((product) => product.productId),
+        startsAt: SUMMER_DAY_MANIFEST.startsAt,
+        endsAt: SUMMER_DAY_MANIFEST.endsAt,
+      }));
+      created.push({
+        productCount: group.products.length,
+        effectiveFraction: group.effectiveFraction,
+        effectivePercent: Math.round(Number(group.effectiveFraction) * 1_000_000) / 10_000,
+        ...discount,
+      });
     }
     const production = {
       enabled: true,
@@ -895,6 +1014,8 @@ async function publishSummerDay(req, res) {
       startsAt: SUMMER_DAY_MANIFEST.startsAt,
       endsAt: SUMMER_DAY_MANIFEST.endsAt,
       discounts: created,
+      pausedDiscounts,
+      priceRule: "min(currentPrice, originalPrice * (1 - percentage))",
       scheduledAt: new Date().toISOString(),
     };
     state = await updateState(shop, (current) => ({
@@ -904,6 +1025,7 @@ async function publishSummerDay(req, res) {
     res.json({ ok: true, manifest: summerManifestSummary(), production: state.summerDay.production });
   } catch (error) {
     await Promise.allSettled(created.map((discount) => deleteAutomaticDiscount(shop, req, discount.id)));
+    if (pausedDiscounts.length) await restoreSupersededDiscounts(shop, req, pausedDiscounts).catch(() => {});
     res.status(error.status || (/access|scope|permission/i.test(error.message) ? 403 : 502)).json({
       error: error.message,
       rolledBack: created.length,
@@ -920,12 +1042,13 @@ async function disableSummerProduction(req, res) {
     const results = await Promise.allSettled(ids.map((id) => deleteAutomaticDiscount(shop, req, id)));
     const failed = results.filter((result) => result.status === "rejected");
     if (failed.length) throw new Error("No se pudieron retirar todos los descuentos; vuelve a intentarlo.");
+    if (production?.pausedDiscounts?.length) await restoreSupersededDiscounts(shop, req, production.pausedDiscounts);
     await updateState(shop, (current) => ({
       ...current,
       summerDay: {
         ...(current.summerDay || {}),
         production: production
-          ? { ...production, enabled: false, status: "cancelled", discounts: [], disabledAt: new Date().toISOString() }
+          ? { ...production, enabled: false, status: "cancelled", discounts: [], pausedDiscounts: [], disabledAt: new Date().toISOString() }
           : null,
       },
     }));
@@ -937,7 +1060,7 @@ async function disableSummerProduction(req, res) {
 
 async function summerStorefront(req, res) {
   try {
-    const state = await readState(DEFAULT_SHOP);
+    const state = await cleanupExpiredSummerDay(DEFAULT_SHOP, req);
     const summerDay = state?.summerDay || {};
     const now = Date.now();
     const campaigns = [];
@@ -957,7 +1080,7 @@ async function summerStorefront(req, res) {
       });
     }
     const production = summerDay.production;
-    if (production?.enabled && production.discounts?.length === 3 && summerDay.validation?.ok) {
+    if (production?.enabled && production.discounts?.length >= 1 && summerDay.validation?.ok) {
       campaigns.push({
         mode: "production",
         label: SUMMER_DAY_MANIFEST.display.label,
@@ -3515,7 +3638,6 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
-
 
 
 

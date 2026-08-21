@@ -19,6 +19,14 @@ services:
   app:
     build: .
     restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     env_file:
       - ${APP_ENV_FILE:-.env}
     environment:
@@ -70,4 +78,3 @@ volumes:
   postgres_data:
   caddy_data:
   caddy_config:
-

@@ -63,7 +63,7 @@ test("only SESSION_SECRET (or an explicit previous key) can open encrypted state
   assert.equal(__testing.open(encryptWith(process.env.SHOPIFY_API_SECRET, value)), null);
 });
 
-test("private routes reject forged cookies and accept a current Shopify session token", () => {
+test("private routes reject forged cookies and accept legitimate Shopify and OAuth sessions", () => {
   const forged = encryptWith("development-only-key", {
     shop: "trendsplant-apparel-for-the-modern-nomad",
     createdAt: Date.now(),
@@ -82,6 +82,53 @@ test("private routes reject forged cookies and accept a current Shopify session 
   __testing.authRequired(
     { path: "/api/strategy", headers: { authorization: "Bearer " + signSession() } },
     allowed,
+    () => { nextCalled = true; },
+  );
+  assert.equal(nextCalled, true);
+
+  nextCalled = false;
+  const webAllowed = mockResponse();
+  const webSession = __testing.seal({
+    shop: "trendsplant-apparel-for-the-modern-nomad",
+    createdAt: Date.now(),
+  });
+  __testing.authRequired(
+    { path: "/api/strategy", method: "GET", headers: { cookie: "tp_session=" + webSession } },
+    webAllowed,
+    () => { nextCalled = true; },
+  );
+  assert.equal(nextCalled, true);
+
+  nextCalled = false;
+  const csrfDenied = mockResponse();
+  __testing.authRequired(
+    {
+      path: "/api/strategy",
+      method: "POST",
+      headers: {
+        cookie: "tp_session=" + webSession,
+        host: "gest.trendsplant.com",
+        origin: "https://attacker.example",
+      },
+    },
+    csrfDenied,
+    () => { nextCalled = true; },
+  );
+  assert.equal(nextCalled, false);
+  assert.equal(csrfDenied.statusCode, 403);
+
+  const sameOriginAllowed = mockResponse();
+  __testing.authRequired(
+    {
+      path: "/api/strategy",
+      method: "POST",
+      headers: {
+        cookie: "tp_session=" + webSession,
+        host: "gest.trendsplant.com",
+        origin: "https://gest.trendsplant.com",
+      },
+    },
+    sameOriginAllowed,
     () => { nextCalled = true; },
   );
   assert.equal(nextCalled, true);
@@ -106,6 +153,34 @@ test("HTTP boundary rejects the known forged cookie while preserving signed Shop
     headers: { cookie: "tp_session=" + forged },
   });
   assert.deepEqual(await forgedSession.json(), { authenticated: false });
+
+  const webCookie = __testing.seal({
+    shop: "trendsplant-apparel-for-the-modern-nomad",
+    createdAt: Date.now(),
+  });
+  const webSession = await fetch(origin + "/api/session", {
+    headers: { cookie: "tp_session=" + webCookie },
+  });
+  assert.equal(webSession.status, 200);
+  assert.deepEqual(await webSession.json(), {
+    authenticated: true,
+    shop: "trendsplant-apparel-for-the-modern-nomad",
+    userId: null,
+    authenticatedBy: "oauth_cookie",
+  });
+
+  const csrfLogout = await fetch(origin + "/api/logout", {
+    method: "POST",
+    headers: { cookie: "tp_session=" + webCookie, origin: "https://attacker.example" },
+  });
+  assert.equal(csrfLogout.status, 403);
+
+  const legitimateLogout = await fetch(origin + "/api/logout", {
+    method: "POST",
+    headers: { cookie: "tp_session=" + webCookie, origin },
+  });
+  assert.equal(legitimateLogout.status, 200);
+  assert.deepEqual(await legitimateLogout.json(), { ok: true });
 
   const legitimateSession = await fetch(origin + "/api/session", {
     headers: { authorization: "Bearer " + signSession() },

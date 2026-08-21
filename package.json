@@ -9,11 +9,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check api/[...path].js"
+    "check": "node --check server.js && node --check api/[...path].js && node --check api/_security.js && node --check api/auth/shopify.js && node --check api/auth/callback.js",
+    "test": "node --test test/security.test.js"
   },
   "dependencies": {
     "express": "^5.1.0",
     "postgres": "^3.4.7"
   }
 }
-

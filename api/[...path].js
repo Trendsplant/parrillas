@@ -2157,6 +2157,12 @@ app.get("/api/session", (req, res) => {
   );
 });
 
+app.post("/api/logout", (req, res) => {
+  clearCookie(res, "tp_session");
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true });
+});
+
 function githubThemeAppConfigured() {
   return Boolean(
     process.env.GITHUB_THEME_APP_ID &&

@@ -1,0 +1,670 @@
+{
+  "id": "summer-day-2026",
+  "title": "Summer Day 2026",
+  "timezone": "Europe/Madrid",
+  "startsAt": "2026-08-29T22:00:00.000Z",
+  "endsAt": "2026-08-30T22:00:00.000Z",
+  "display": {
+    "label": "ONLY TODAY",
+    "showPdp": true,
+    "showPlp": true
+  },
+  "products": [
+    {
+      "sku": "299060WSGH",
+      "title": "Women’s Color Block Oversized Hoodie Sea Glass",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299060MGSH",
+      "title": "The Garage Sweatshirt Hedge Green",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029060WESH",
+      "title": "Women’s Essential Hoodie Sea Glass",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289040MPGH",
+      "title": "Color Block Hoodie Pale Glow",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299060MHSM",
+      "title": "The Hooded Oversized Sweatshirt Warm Heather Grey/Matcha",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029550MPPS",
+      "title": "Essential Pigment Heavyweight Polo Sweatshirt Pewter",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029970WESC",
+      "title": "Women’s Essential Sunwashed T-Shirt Calcite",
+      "discountPercent": 60
+    },
+    {
+      "sku": "299060WDSS",
+      "title": "Women’s Color Block Oversized Sweatshirt Deep Spruce",
+      "discountPercent": 50
+    },
+    {
+      "sku": "289940MPGT",
+      "title": "Color Block T-Shirt Pale Glow/Iron Veil",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289940WPGT",
+      "title": "Women's Color Block T-Shirt Pale Glow",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289050MHSW",
+      "title": "The Hooded Oversized Sweatshirt Warm Heather Grey/Wine Red",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029050MOGS",
+      "title": "Essential Garment Heavyweight Sweatshirt Organic Gray",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289940MSHT",
+      "title": "Color Block T-Shirt Pale Glow/Steel Haze",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299910MPTP",
+      "title": "Panqueque T-Shirt Pageant Blue",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299940MPTM",
+      "title": "Panqueque T-Shirt Marshmallow",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299060MSSM",
+      "title": "Color Block Sweatshirt Salted Moss",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299060MSGZ",
+      "title": "Color Block Zip Hoodie Sea Glass",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299960WSMT",
+      "title": "Women’s Color Block T-Shirt Salted Moss",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299960MCOH",
+      "title": "Core Oversized T-Shirt Hedge Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299990MBOC",
+      "title": "Bench Oversized T-Shirt Saddle Brown",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299940MCOA",
+      "title": "Core Oversized T-shirt Antique White",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299870MELB",
+      "title": "Escollera L/S T-Shirt Bougainvillea Blush",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299940MLPW",
+      "title": "La Plaza T-Shirt Whitewashed Walls",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299040MSMQ",
+      "title": "Sant Miquel Quarter Zip Sweatshirt Whitewashed Walls",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299910WESD",
+      "title": "Women’s Escollera T-Shirt Dome Blue",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029910MEOW",
+      "title": "Essential Sunwashed Heavyweight Oversized T-Shirt Washed Navy",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289060MARB",
+      "title": "Aroes Pigment Heavyweight Hoodie Oak Green",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029910WESU",
+      "title": "Women’s Essential Sunwashed T-Shirt Ultramarine",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029960WECT",
+      "title": "Women’s Essential T-Shirt Coastal Fog",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029960WEST",
+      "title": "Women’s Essential T-Shirt Sea Glass",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060WECZ",
+      "title": "Women’s Essential Zip Hoodie Coastal Fog",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289050MHSH",
+      "title": "The Hooded Oversized Sweatshirt Warm Heather Grey/Scarab",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029940MOPI",
+      "title": "Essential Garment Heavyweight Oversized T-Shirt Pearled Ivory",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289050MRHG",
+      "title": "Reversible Fleece Hoodie",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029550MIPS",
+      "title": "Essential Pigment Heavyweight Polo Sweatshirt Island Fossil",
+      "discountPercent": 50
+    },
+    {
+      "sku": "289010MSHP",
+      "title": "Color Block Oversized Polo Sweatshirt Steel Haze",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299010MGSB",
+      "title": "The Garage Sweatshirt Baritone Blue",
+      "discountPercent": 60
+    },
+    {
+      "sku": "279950MLB7",
+      "title": "Life by the Sea VII by P.Bueno Pigment T-Shirt Magnet Grey",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299910MBOB",
+      "title": "Bench Oversized T-Shirt Baritone Blue",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060MKGS",
+      "title": "Essential Garment Heavyweight Sweatshirt Kombu Green",
+      "discountPercent": 50
+    },
+    {
+      "sku": "019940MHLT",
+      "title": "Trendsplant x Antonyo Marest HdS Lobby T-Shirt White",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299060MHDS",
+      "title": "Color Block Hoodie Deep Spruce",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299240MCBW",
+      "title": "Cap Blanch Linen L/S Camp Shirt Whitewashed Walls",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299960MLPO",
+      "title": "La Plaza T-Shirt Olive Shade",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299970WSMB",
+      "title": "Women’s Sant Miquel T-Shirt Bougainvillea Blush",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060MESS",
+      "title": "Essential Sweatshirt Sea Glass",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029040MPIS",
+      "title": "Essential Garment Heavyweight Sweatshirt Pearled Ivory",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029990MDEE",
+      "title": "Essential Garment T-Shirt Delicioso",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029960MDSE",
+      "title": "Essential Garment T-Shirt Dried Sage",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029950MOGE",
+      "title": "Essential Garment T-Shirt Organic Gray",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289090MCAC",
+      "title": "Carvalho Pigment Heavyweight Polo Sweatshirt Chestnut",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289060MCAH",
+      "title": "Carvalho Pigment Heavyweight Polo Sweatshirt Silver Green",
+      "discountPercent": 50
+    },
+    {
+      "sku": "289990MFAT",
+      "title": "Fafe Pigment T-Shirt Chestnut",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289960MGBF",
+      "title": "Garza Pigment T-Shirt Oak Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289960MGHG",
+      "title": "Garza Pigment T-Shirt Silver Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289990MPON",
+      "title": "Pontido Pigment T-Shirt Chestnut",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029990MOPB",
+      "title": "Essential Pigment Heavyweight Oversized T-Shirt Brindle",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029950MOPT",
+      "title": "Essential Pigment Heavyweight Oversized T-Shirt Pewter",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029050MESS",
+      "title": "Essential Pigment Heavyweight Sweatshirt Elephant Skin",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029060MSGS",
+      "title": "Essential Pigment Heavyweight Sweatshirt Stone Gray",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029950MESE",
+      "title": "Essential Pigment T-Shirt Elephant Skin",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289030MNRH",
+      "title": "Color Block Hoodie Nightfall Ruby",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060MSHK",
+      "title": "The Super Heavy Oversized Hoodie Kombu Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "269020MSBS",
+      "title": "Sauce Loopback Pigment Dyed Half Zip Sweatshirt Burning Sky",
+      "discountPercent": 40
+    },
+    {
+      "sku": "269920MGBS",
+      "title": "Garza Pigment Dyed T-Shirt Burning Sky",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299960MSGT",
+      "title": "Color Block T-Shirt Sea Glass",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299960WSGT",
+      "title": "Women’s Color Block T-Shirt Sea Glass",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029920MESD",
+      "title": "Essential Sunwashed T-Shirt Deco Rose",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060MEDS",
+      "title": "Essential Sweatshirt Deep Spruce",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029960WEDT",
+      "title": "Women’s Essential T-Shirt Deep Spruce",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029950MIFE",
+      "title": "Essential Pigment T-Shirt Island Fossil",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289060MARE",
+      "title": "Aroes Pigment Heavyweight Hoodie Eucalyptus",
+      "discountPercent": 50
+    },
+    {
+      "sku": "299960MCFT",
+      "title": "Color Block T-Shirt Coastal   Fog",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029960MODS",
+      "title": "Essential Garment Heavyweight Oversized T-Shirt Dried Sage",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029960MOKG",
+      "title": "Essential Garment Heavyweight Oversized T-Shirt Kombu Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029090MCAS",
+      "title": "Essential Garment Heavyweight Sweatshirt Caribou",
+      "discountPercent": 40
+    },
+    {
+      "sku": "279940MLB7",
+      "title": "Life by the Sea VII by P.Bueno Pigment T-Shirt Foam White",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029910MDAE",
+      "title": "Essential Pigment T-Shirt Dusty Aqua",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299210MMBI",
+      "title": "Mechanic Box Seaqual®Yarn S/S Shirt Indigo Stripes",
+      "discountPercent": 40
+    },
+    {
+      "sku": "299260MMBG",
+      "title": "Mechanic Box Seaqual®Yarn S/S Shirt Green Stripes",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029520MOPB",
+      "title": "Organic Essential Polo Shirt Burgundy",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029560MOPG",
+      "title": "Organic Essential Polo Shirt Greener Pastures",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060WDSS",
+      "title": "Women's Essential Garment Heavyweight Oversized Sweatshirt Dried Sage",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029090WBRS",
+      "title": "Women's Essential Pigment Heavyweight Oversized Sweatshirt Brindle",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289040WPGH",
+      "title": "Women's Color Block Oversized Hoodie Pale Glow",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289010WSHH",
+      "title": "Women's Color Block Oversized Hoodie Steel Haze",
+      "discountPercent": 50
+    },
+    {
+      "sku": "289960WIVT",
+      "title": "Women's Color Block T-Shirt Iron Veil",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289910WSHT",
+      "title": "Women's Color Block T-Shirt Steel Haze",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289960WGAE",
+      "title": "Women's Garceta Pigment T-Shirt Eucalyptus",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289060WCEH",
+      "title": "Women's Cepaes Pigment Heavyweight Oversized Hoodie Silver Green",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029950WPEE",
+      "title": "Women's Essential Pigment T-Shirt Pewter",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029990WCAE",
+      "title": "Women's Essential Garment T-Shirt Caribou",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029050WIFS",
+      "title": "Women's Essential Pigment Heavyweight Oversized Sweatshirt Island Fossil",
+      "discountPercent": 60
+    },
+    {
+      "sku": "289060WIVS",
+      "title": "Women's Color Block Oversized Sweatshirt Iron Veil",
+      "discountPercent": 50
+    },
+    {
+      "sku": "029960WDSE",
+      "title": "Women's Essential Garment T-Shirt Dried Sage",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029090WDES",
+      "title": "Women's Essential Garment Heavyweight Oversized Sweatshirt Delicioso",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029940WPIE",
+      "title": "Women's Essential Garment T-Shirt Pearled Ivory",
+      "discountPercent": 60
+    },
+    {
+      "sku": "029060WBGH",
+      "title": "Women's Essential Garment Heavyweight Oversized Hoodie Botanical Garden",
+      "discountPercent": 40
+    },
+    {
+      "sku": "029060WKGH",
+      "title": "Women's Essential Garment Heavyweight Oversized Quater Zip Sweatshirt Kombu Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "012040UHSL",
+      "title": "Trendsplant x Antonyo Marest Hotel del Sol Slippers White",
+      "discountPercent": 50
+    },
+    {
+      "sku": "289960MFAT",
+      "title": "Fafe Pigment T-Shirt Forest Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "289960WFAB",
+      "title": "Women's Fafe Pigment T-Shirt Oak Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "018510MAML",
+      "title": "Antonyo Marest x Trendsplant Lifeguard Swim Short V.1 Seaqual®Yarn",
+      "discountPercent": 40
+    },
+    {
+      "sku": "018540MHSW",
+      "title": "Trendsplant x Antonyo Marest Hotel del Sol Seaqual®Yarn Swim Short Foam White",
+      "discountPercent": 50
+    },
+    {
+      "sku": "028510MMSS",
+      "title": "Manada SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 60
+    },
+    {
+      "sku": "028560MEQF",
+      "title": "Essential Q-Nova® Swim Trunks Forest Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "158541MDSS",
+      "title": "Dogtown SEAQUAL®YARN Swim Trunks Purple",
+      "discountPercent": 40
+    },
+    {
+      "sku": "158560BDKS",
+      "title": "Dogtown SEAQUAL®YARN Kid's Swim Trunks Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "158560MDSS",
+      "title": "Dogtown SEAQUAL®YARN Swim Trunks Green",
+      "discountPercent": 40
+    },
+    {
+      "sku": "178510KMTN",
+      "title": "Manada Tonal Kids SEAQUAL®YARN Swim Trunks Navy",
+      "discountPercent": 60
+    },
+    {
+      "sku": "178510MOPS",
+      "title": "Ocean Paisley SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 60
+    },
+    {
+      "sku": "198510MBPS",
+      "title": "Breeze Paisley SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 60
+    },
+    {
+      "sku": "198520MDRS",
+      "title": "Dogtown SEAQUAL®YARN Swim Trunks Red",
+      "discountPercent": 40
+    },
+    {
+      "sku": "198560MOKS",
+      "title": "Owari Kids SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 40
+    },
+    {
+      "sku": "218510MPCS",
+      "title": "Caribbean Paisley SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 40
+    },
+    {
+      "sku": "238510MTED",
+      "title": "Terrazzo SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 40
+    },
+    {
+      "sku": "238520MOGR",
+      "title": "Owari SEAQUAL®YARN Swim Trunks Grape Red",
+      "discountPercent": 60
+    },
+    {
+      "sku": "238531MPME",
+      "title": "Mediterranean Paisley SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 60
+    },
+    {
+      "sku": "238560MPFO",
+      "title": "Forest Paisley SEAQUAL®YARN Swim Trunks",
+      "discountPercent": 60
+    },
+    {
+      "sku": "238560MSSE",
+      "title": "Strokes SEAQUAL®YARN Swim Trunks Seaweed Green",
+      "discountPercent": 60
+    },
+    {
+      "sku": "258510KTLB",
+      "title": "Tiles SEAQUAL®YARN Kid's Swim Trunks Light Blue",
+      "discountPercent": 50
+    },
+    {
+      "sku": "258510MBCB",
+      "title": "Beach Club SEAQUAL®YARN Swim Trunks Royal Blue",
+      "discountPercent": 40
+    },
+    {
+      "sku": "258510MTLB",
+      "title": "Tiles SEAQUAL®YARN Swim Trunks Light Blue",
+      "discountPercent": 60
+    },
+    {
+      "sku": "258511MBCY",
+      "title": "Beach Club SEAQUAL®YARN Swim Trunks Golden Yellow",
+      "discountPercent": 60
+    },
+    {
+      "sku": "258560MQCS",
+      "title": "Color Block Q-Nova® Swim Trunks Spring Green",
+      "discountPercent": 60
+    },
+    {
+      "sku": "258560MTAG",
+      "title": "Tiles SEAQUAL®YARN Swim Trunks Aqua Green",
+      "discountPercent": 60
+    },
+    {
+      "sku": "258570KQCM",
+      "title": "Color Block Q-Nova® Kid's Swim Trunks Mauve",
+      "discountPercent": 40
+    },
+    {
+      "sku": "258570MBCF",
+      "title": "Beach Club SEAQUAL®YARN Swim Trunks Fuchsia",
+      "discountPercent": 60
+    },
+    {
+      "sku": "258570MQCM",
+      "title": "Color Block Q-Nova® Swim Trunks Mauve",
+      "discountPercent": 40
+    },
+    {
+      "sku": "278741MTSG",
+      "title": "Trippyplant Seaqual®Yarn Swim Short Sour Grape",
+      "discountPercent": 60
+    },
+    {
+      "sku": "278760MTMM",
+      "title": "Trippyplant Seaqual®Yarn Swim Short Mystic Mint",
+      "discountPercent": 60
+    }
+  ]
+}
+

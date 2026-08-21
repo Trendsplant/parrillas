@@ -1,8 +1,10 @@
 import express from "express";
 import crypto from "node:crypto";
-import { neon } from "@neondatabase/serverless";
+import fs from "node:fs";
+import postgres from "postgres";
 
 const app = express();
+app.disable("x-powered-by");
 app.use(express.json({
   limit: "200kb",
   verify(req, _res, buffer) {
@@ -16,8 +18,16 @@ const STATE_VERSION = 3;
 const WEATHER_TTL_MS = 15 * 60 * 1000;
 const SALES_TTL_MS = 15 * 60 * 1000;
 const RANKING_TTL_MS = 30 * 1000;
+const WEATHER_CACHE_LIMIT = 1000;
+const RANKING_CACHE_LIMIT = 2000;
 const EVENT_RATE_LIMIT = 120;
 const EVENT_RATE_WINDOW_MS = 60 * 1000;
+const IP_EVENT_RATE_LIMIT = 600;
+const PUBLIC_READ_RATE_LIMIT = 120;
+const RATE_BUCKET_LIMIT = 10000;
+const GEO_TTL_MS = 6 * 60 * 60 * 1000;
+const GEO_CACHE_LIMIT = 5000;
+const DIMENSION_LIMIT = 200;
 const MAX_STRATEGY_VERSIONS = 30;
 const ADMIN_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const GITHUB_THEME_OWNER = "Trendsplant";
@@ -27,6 +37,31 @@ const GITHUB_THEME_TARGET_BRANCH = "main";
 const GITHUB_API_VERSION = "2022-11-28";
 const THEME_RELEASE_LOCK_TTL_SECONDS = 15 * 60;
 const THEME_RELEASE_COOLDOWN_SECONDS = 10;
+const SUMMER_DAY_MANIFEST = JSON.parse(
+  fs.readFileSync(new URL("../data/summer-day-2026.json", import.meta.url), "utf8"),
+);
+const SUMMER_DAY_PERCENTAGES = [40, 50, 60];
+const SUMMER_DAY_TEST_MAX_MINUTES = 120;
+const SUMMER_DAY_SUPERSEDED_DISCOUNTS = [
+  { id: "gid://shopify/DiscountAutomaticNode/1684050936140", title: "Essential men x3 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/1684051034444", title: "Essential men x5 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/1684056211788", title: "Essential women x3 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/1684056277324", title: "Essential women x5 bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/2275052618060", title: "Swimwear x2 Bundle" },
+  { id: "gid://shopify/DiscountAutomaticNode/2275052945740", title: "Swimwear x3 Bundle" },
+];
+const summerCleanupPromises = new Map();
+
+function assertSecurityConfiguration() {
+  if (String(process.env.SESSION_SECRET || "").trim().length < 32) {
+    throw new Error("SESSION_SECRET debe estar configurada con al menos 32 caracteres.");
+  }
+  if (!String(process.env.SHOPIFY_API_SECRET || "").trim()) {
+    throw new Error("SHOPIFY_API_SECRET debe estar configurada.");
+  }
+}
+
+assertSecurityConfiguration();
 
 const DEFAULT_STRATEGY = {
   enabled: true,
@@ -66,6 +101,9 @@ const weatherCache = new Map();
 const salesCache = new Map();
 const rankingCache = new Map();
 const eventRateBuckets = new Map();
+const ipEventRateBuckets = new Map();
+const publicReadRateBuckets = new Map();
+const geoCache = new Map();
 let githubInstallationTokenCache = null;
 const runtimeMetrics = {
   startedAt: new Date().toISOString(),
@@ -86,6 +124,7 @@ const runtimeMetrics = {
 app.use((req, res, next) => {
   const started = Date.now();
   runtimeMetrics.requests += 1;
+  if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "private, no-store, max-age=0");
   res.on("finish", () => {
     runtimeMetrics.latencyTotalMs += Date.now() - started;
     if (res.statusCode >= 500) runtimeMetrics.errors += 1;
@@ -97,16 +136,23 @@ function b64(buffer) {
   return buffer.toString("base64url");
 }
 
-function secretKey() {
-  return crypto
-    .createHash("sha256")
-    .update(process.env.SHOPIFY_API_SECRET || "development-only-key")
-    .digest();
+function secretKeys() {
+  const current = String(process.env.SESSION_SECRET || "").trim();
+  const previous = String(process.env.SESSION_SECRET_PREVIOUS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const values = [current, ...previous].filter(Boolean);
+  return [...new Set(values)].map((value) =>
+    crypto.createHash("sha256").update(value).digest(),
+  );
 }
 
 function seal(value) {
+  const key = secretKeys()[0];
+  if (!key) throw new Error("SESSION_SECRET no está configurada.");
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", secretKey(), iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const payload = Buffer.concat([
     cipher.update(JSON.stringify(value)),
     cipher.final(),
@@ -116,42 +162,57 @@ function seal(value) {
 }
 
 function open(value) {
-  try {
-    const payload = Buffer.from(value, "base64url");
-    const iv = payload.subarray(0, 12);
-    const tag = payload.subarray(-16);
-    const decipher = crypto.createDecipheriv("aes-256-gcm", secretKey(), iv);
-    decipher.setAuthTag(tag);
-    return JSON.parse(
-      Buffer.concat([decipher.update(payload.subarray(12, -16)), decipher.final()]).toString(),
-    );
-  } catch {
-    return null;
+  if (!value || !secretKeys().length) return null;
+  const payload = Buffer.from(value, "base64url");
+  if (payload.length < 29) return null;
+  for (const key of secretKeys()) {
+    try {
+      const iv = payload.subarray(0, 12);
+      const tag = payload.subarray(-16);
+      const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(tag);
+      return JSON.parse(
+        Buffer.concat([decipher.update(payload.subarray(12, -16)), decipher.final()]).toString(),
+      );
+    } catch {}
   }
+  return null;
 }
 
-const DATABASE_URL = process.env.NEON_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+const DATABASE_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 let sql;
-let stateStorageReady = false;
-let themeReleaseLockStorageReady = false;
-let themeReleaseAuditStorageReady = false;
+let stateStoragePromise = null;
+let themeReleaseLockStoragePromise = null;
+let themeReleaseAuditStoragePromise = null;
+let webhookEventStoragePromise = null;
 
 function database() {
   if (!DATABASE_URL) {
-    throw new Error("La base de datos Neon no está conectada.");
+    throw new Error("La base de datos PostgreSQL no está conectada.");
   }
-  sql ||= neon(DATABASE_URL);
+  sql ||= postgres(DATABASE_URL, {
+    max: Number(process.env.POSTGRES_POOL_SIZE || 10),
+    idle_timeout: 20,
+    connect_timeout: 10,
+  });
   return sql;
 }
 
 async function ensureStateStorage() {
-  if (stateStorageReady) return;
-  await database()`CREATE TABLE IF NOT EXISTS trendsplant_app_state (
-    shop TEXT PRIMARY KEY,
-    payload TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`;
-  stateStorageReady = true;
+  if (!stateStoragePromise) {
+    stateStoragePromise = database().begin(async (transaction) => {
+      await transaction`SELECT pg_advisory_xact_lock(81002001)`;
+      await transaction`CREATE TABLE IF NOT EXISTS trendsplant_app_state (
+        shop TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+    }).catch((error) => {
+      stateStoragePromise = null;
+      throw error;
+    });
+  }
+  await stateStoragePromise;
 }
 
 async function readState(shop) {
@@ -161,26 +222,76 @@ async function readState(shop) {
 }
 
 async function writeState(shop, patch) {
-  const current = (await readState(shop)) || { version: STATE_VERSION, shop };
-  const next = {
-    ...current,
-    ...patch,
-    version: STATE_VERSION,
-    shop,
-    updatedAt: new Date().toISOString(),
-  };
-  await database()`INSERT INTO trendsplant_app_state (shop, payload, updated_at)
-    VALUES (${shop}, ${seal(next)}, NOW())
-    ON CONFLICT (shop) DO UPDATE
-    SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`;
-  return next;
+  return updateState(shop, (current) => ({ ...current, ...patch }));
+}
+
+async function updateState(shop, updater) {
+  await ensureStateStorage();
+  return database().begin(async (transaction) => {
+    await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${shop}, 0))`;
+    const rows = await transaction`SELECT payload FROM trendsplant_app_state WHERE shop = ${shop} LIMIT 1`;
+    const current = rows[0]?.payload ? open(rows[0].payload) : null;
+    const updated = await updater(current || { version: STATE_VERSION, shop });
+    const next = {
+      ...(updated || current || {}),
+      version: STATE_VERSION,
+      shop,
+      updatedAt: new Date().toISOString(),
+    };
+    await transaction`INSERT INTO trendsplant_app_state (shop, payload, updated_at)
+      VALUES (${shop}, ${seal(next)}, NOW())
+      ON CONFLICT (shop) DO UPDATE
+      SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at`;
+    return next;
+  });
+}
+
+async function ensureWebhookEventStorage() {
+  if (!webhookEventStoragePromise) {
+    webhookEventStoragePromise = database().begin(async (transaction) => {
+      await transaction`SELECT pg_advisory_xact_lock(81002004)`;
+      await transaction`CREATE TABLE IF NOT EXISTS trendsplant_webhook_events (
+        event_id TEXT PRIMARY KEY,
+        shop TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await transaction`CREATE INDEX IF NOT EXISTS trendsplant_webhook_events_received_at_idx
+        ON trendsplant_webhook_events (received_at)`;
+    }).catch((error) => {
+      webhookEventStoragePromise = null;
+      throw error;
+    });
+  }
+  await webhookEventStoragePromise;
+}
+
+async function claimWebhookEvent(eventId, shop, topic) {
+  await ensureWebhookEventStorage();
+  const rows = await database()`INSERT INTO trendsplant_webhook_events (event_id, shop, topic)
+    VALUES (${eventId}, ${shop}, ${topic})
+    ON CONFLICT (event_id) DO NOTHING
+    RETURNING event_id`;
+  if (rows.length) {
+    await database()`DELETE FROM trendsplant_webhook_events
+      WHERE received_at < NOW() - INTERVAL '30 days'`;
+  }
+  return rows.length === 1;
+}
+
+async function releaseWebhookEvent(eventId) {
+  await ensureWebhookEventStorage();
+  await database()`DELETE FROM trendsplant_webhook_events WHERE event_id = ${eventId}`;
 }
 
 function cookie(res, name, value, maxAge = 600) {
-  res.setHeader(
-    "Set-Cookie",
-    name + "=" + value + "; Path=/; Max-Age=" + maxAge + "; HttpOnly; Secure; SameSite=Lax",
-  );
+  const next = name + "=" + value + "; Path=/; Max-Age=" + maxAge + "; HttpOnly; Secure; SameSite=Lax";
+  const current = res.getHeader("Set-Cookie");
+  res.setHeader("Set-Cookie", current ? [...(Array.isArray(current) ? current : [current]), next] : next);
+}
+
+function clearCookie(res, name) {
+  cookie(res, name, "deleted", 0);
 }
 
 function shopifySessionTokenFrom(req) {
@@ -265,9 +376,64 @@ function sessionFrom(req) {
 
 function shopOf(req) {
   const raw = String(req.query?.shop || req.body?.shop || DEFAULT_SHOP);
-  return raw.endsWith(".myshopify.com")
-    ? raw.replace(/\.myshopify\.com$/, "")
-    : DEFAULT_SHOP;
+  const normalized = raw.toLowerCase().replace(/\.myshopify\.com$/, "");
+  return normalized === DEFAULT_SHOP ? DEFAULT_SHOP : DEFAULT_SHOP;
+}
+
+function validOAuthHmac(query = {}) {
+  const secret = String(process.env.SHOPIFY_API_SECRET || "");
+  const provided = String(query.hmac || "");
+  if (!secret || !/^[a-f0-9]{64}$/i.test(provided)) return false;
+  const message = Object.entries(query)
+    .filter(([key]) => key !== "hmac" && key !== "signature")
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => key + "=" + (Array.isArray(value) ? value.join(",") : String(value)))
+    .join("&");
+  const expected = crypto.createHmac("sha256", secret).update(message).digest("hex");
+  const left = Buffer.from(provided, "hex");
+  const right = Buffer.from(expected, "hex");
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function clientIp(req) {
+  const value = String(req.ip || req.socket?.remoteAddress || "unknown").split(",")[0].trim();
+  return value.replace(/^::ffff:/, "").slice(0, 80) || "unknown";
+}
+
+function boundedRateAllowed(store, key, limit, windowMs) {
+  const now = Date.now();
+  const bucket = store.get(key);
+  if (!bucket || now - bucket.startedAt >= windowMs) {
+    if (store.size >= RATE_BUCKET_LIMIT) {
+      for (const [candidate, value] of store) {
+        if (now - value.startedAt >= windowMs) store.delete(candidate);
+        if (store.size < RATE_BUCKET_LIMIT) break;
+      }
+      if (store.size >= RATE_BUCKET_LIMIT) store.delete(store.keys().next().value);
+    }
+    store.set(key, { startedAt: now, count: 1 });
+    return true;
+  }
+  bucket.count += 1;
+  return bucket.count <= limit;
+}
+
+function setBoundedCache(store, key, value, limit) {
+  const now = Date.now();
+  for (const [candidate, entry] of store) {
+    if (!entry || Number(entry.expiresAt || 0) <= now) store.delete(candidate);
+  }
+  if (!store.has(key) && store.size >= limit) store.delete(store.keys().next().value);
+  store.set(key, value);
+}
+
+function publicReadLimit(req, res, next) {
+  if (!boundedRateAllowed(publicReadRateBuckets, clientIp(req), PUBLIC_READ_RATE_LIMIT, EVENT_RATE_WINDOW_MS)) {
+    runtimeMetrics.rateLimited += 1;
+    res.setHeader("Retry-After", "60");
+    return res.status(429).json({ error: "Demasiadas solicitudes." });
+  }
+  next();
 }
 
 function collectionHandlesFor(strategy = {}) {
@@ -359,12 +525,12 @@ function normalizeManualOverrides(overrides = {}) {
 }
 
 app.use((req, res, next) => {
-  if (["/api/storefront-ranking", "/api/analytics-events", "/api/visitor-context"].includes(req.path)) {
+  if (["/api/storefront-ranking", "/api/analytics-events", "/api/visitor-context", "/api/discounts/summer-day/storefront"].includes(req.path)) {
     const origin = String(req.headers.origin || "");
     if (/https:\/\/([a-z0-9-]+\.)?trendsplant\.com$/i.test(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
     }
-    res.setHeader("Vary", "Origin, X-Vercel-IP-Country, X-Vercel-IP-Country-Region");
+    res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-TP-Session");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     if (req.method === "OPTIONS") return res.status(204).end();
@@ -372,18 +538,23 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(["/api/storefront-ranking", "/api/visitor-context", "/api/discounts/summer-day/storefront"], publicReadLimit);
+
 function authRequired(req, res, next) {
   const publicPaths = [
     "/api/health",
     "/api/session",
     "/auth/shopify",
     "/auth/callback",
+    "/api/auth/shopify",
+    "/api/auth/callback",
     "/api/storefront-ranking",
     "/api/analytics-events",
     "/api/visitor-context",
+    "/api/discounts/summer-day/storefront",
     "/api/webhooks/orders-create",
   ];
-  if (publicPaths.includes(req.path) || sessionFrom(req)) return next();
+  if (publicPaths.includes(req.path) || shopifySessionTokenFrom(req)) return next();
   res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
   return res.status(401).json({
     error: "Autenticación requerida.",
@@ -394,10 +565,15 @@ function authRequired(req, res, next) {
 app.use(authRequired);
 
 async function acquireClientCredentialsToken(shop) {
+  const clientId = String(process.env.SHOPIFY_API_KEY || "").trim();
+  const clientSecret = String(process.env.SHOPIFY_API_SECRET || "").trim();
+  if (!clientId || !clientSecret) {
+    throw new Error("Faltan SHOPIFY_API_KEY o SHOPIFY_API_SECRET en el servidor.");
+  }
   const body = new URLSearchParams({
     grant_type: "client_credentials",
-    client_id: process.env.SHOPIFY_API_KEY || "",
-    client_secret: process.env.SHOPIFY_API_SECRET || "",
+    client_id: clientId,
+    client_secret: clientSecret,
   });
   const response = await fetch("https://" + shop + ".myshopify.com/admin/oauth/access_token", {
     method: "POST",
@@ -411,7 +587,11 @@ async function acquireClientCredentialsToken(shop) {
     data = JSON.parse(raw);
   } catch {}
   if (!response.ok || !data.access_token) {
-    throw new Error("No se pudo autenticar con Shopify (" + response.status + ").");
+    const reason = String(data.error_description || data.error || "").slice(0, 240);
+    throw new Error(
+      "No se pudo autenticar con Shopify (" + response.status + ")" +
+        (reason ? ": " + reason : "."),
+    );
   }
   return {
     value: data.access_token,
@@ -478,6 +658,549 @@ async function gql(shop, query, variables = {}, req) {
   return data.data;
 }
 
+function summerManifestSummary() {
+  const counts = Object.fromEntries(
+    SUMMER_DAY_PERCENTAGES.map((percentage) => [
+      percentage,
+      SUMMER_DAY_MANIFEST.products.filter((product) => product.discountPercent === percentage).length,
+    ]),
+  );
+  return {
+    id: SUMMER_DAY_MANIFEST.id,
+    title: SUMMER_DAY_MANIFEST.title,
+    timezone: SUMMER_DAY_MANIFEST.timezone,
+    startsAt: SUMMER_DAY_MANIFEST.startsAt,
+    endsAt: SUMMER_DAY_MANIFEST.endsAt,
+    total: SUMMER_DAY_MANIFEST.products.length,
+    counts,
+  };
+}
+
+function chunks(values, size) {
+  const output = [];
+  for (let index = 0; index < values.length; index += size) output.push(values.slice(index, index + size));
+  return output;
+}
+
+function summerProductPricePlan(variants, discountPercent) {
+  const rows = (variants || []).map((variant) => {
+    const currentCents = Math.round(Number(variant.price || 0) * 100);
+    const compareAtCents = Math.round(Number(variant.compareAtPrice || 0) * 100);
+    const originalCents = compareAtCents > currentCents ? compareAtCents : currentCents;
+    const targetCents = Math.round(originalCents * (100 - discountPercent) / 100);
+    const requiredCents = Math.max(0, currentCents - targetCents);
+    const fraction = currentCents > 0 && requiredCents > 0 ? (requiredCents / currentCents).toFixed(12) : null;
+    return { variantId: variant.id, sku: variant.sku, currentCents, originalCents, targetCents, requiredCents, fraction };
+  });
+  const fractions = [...new Set(rows.map((row) => row.fraction).filter(Boolean))];
+  const noDiscountVariants = rows.filter((row) => row.requiredCents === 0).length;
+  return {
+    ok: rows.length > 0 && fractions.length <= 1 && (noDiscountVariants === 0 || noDiscountVariants === rows.length),
+    discountRequired: fractions.length === 1,
+    effectiveFraction: fractions[0] || null,
+    effectivePercent: fractions[0] ? Math.round(Number(fractions[0]) * 1_000_000) / 10_000 : 0,
+    variants: rows.length,
+    variantsAlreadyAtOrBelowTarget: noDiscountVariants,
+  };
+}
+
+async function resolveSummerProducts(shop, req) {
+  const variants = [];
+  for (const group of chunks(SUMMER_DAY_MANIFEST.products, 15)) {
+    // The spreadsheet contains each model's base SKU; Shopify variants append the size
+    // (for example 299060WSGH02). Prefix search keeps the mapping deterministic while
+    // still resolving every size to its single parent product.
+    const query = group.map((product) => "sku:" + product.sku + "*").join(" OR ");
+    const data = await gql(
+      shop,
+      `query SummerVariants($query:String!){productVariants(first:250,query:$query){nodes{id sku price compareAtPrice product{id legacyResourceId title handle status featuredMedia{preview{image{url}}}}}}}`,
+      { query },
+      req,
+    );
+    variants.push(...(data.productVariants?.nodes || []));
+  }
+
+  const resolved = [];
+  const missing = [];
+  const ambiguous = [];
+  for (const item of SUMMER_DAY_MANIFEST.products) {
+    const baseSku = item.sku.trim().toUpperCase();
+    const matchingVariants = variants.filter((variant) =>
+      String(variant.sku || "").trim().toUpperCase().startsWith(baseSku),
+    );
+    const products = [...new Map(matchingVariants.map((variant) => [variant.product?.id, variant.product])).values()].filter(
+      (product) => product?.id,
+    );
+    if (!products.length) {
+      missing.push(item);
+      continue;
+    }
+    if (products.length !== 1) {
+      ambiguous.push({ ...item, matches: products.map((product) => ({ id: product.id, title: product.title })) });
+      continue;
+    }
+    const product = products[0];
+    const pricePlan = summerProductPricePlan(matchingVariants, item.discountPercent);
+    resolved.push({
+      sku: item.sku,
+      expectedTitle: item.title,
+      discountPercent: item.discountPercent,
+      productId: product.id,
+      legacyResourceId: String(product.legacyResourceId || ""),
+      title: product.title,
+      handle: product.handle,
+      status: product.status,
+      image: product.featuredMedia?.preview?.image?.url || null,
+      pricePlan,
+    });
+  }
+  const duplicateProducts = Object.entries(
+    resolved.reduce((accumulator, product) => {
+      (accumulator[product.productId] ||= []).push(product);
+      return accumulator;
+    }, {}),
+  )
+    .filter(([, products]) => products.length > 1)
+    .map(([productId, products]) => ({ productId, skus: products.map((product) => product.sku) }));
+  const inconsistentPricing = resolved
+    .filter((product) => !product.pricePlan.ok)
+    .map((product) => ({ sku: product.sku, productId: product.productId, pricePlan: product.pricePlan }));
+  const pricingGroups = [...new Set(resolved.map((product) => product.pricePlan.effectiveFraction).filter(Boolean))];
+  return {
+    ok: missing.length === 0 && ambiguous.length === 0 && duplicateProducts.length === 0 && inconsistentPricing.length === 0,
+    checkedAt: new Date().toISOString(),
+    total: SUMMER_DAY_MANIFEST.products.length,
+    resolved,
+    missing,
+    ambiguous,
+    duplicateProducts,
+    inconsistentPricing,
+    pricingGroups,
+  };
+}
+
+function summerBasicDiscountInput({ title, effectiveFraction, productIds, startsAt, endsAt }) {
+  return {
+    title,
+    startsAt,
+    endsAt,
+    customerGets: {
+      value: { percentage: Number(effectiveFraction) },
+      items: { products: { productsToAdd: [...new Set(productIds)] } },
+    },
+    combinesWith: { productDiscounts: false, orderDiscounts: false, shippingDiscounts: false },
+  };
+}
+
+async function createSummerBasicDiscount(shop, req, input) {
+  const data = await gql(
+    shop,
+    `mutation CreateSummerDiscount($input:DiscountAutomaticBasicInput!){discountAutomaticBasicCreate(automaticBasicDiscount:$input){automaticDiscountNode{id automaticDiscount{... on DiscountAutomaticBasic{title status startsAt endsAt}}}userErrors{field code message}}}`,
+    { input },
+    req,
+  );
+  const result = data.discountAutomaticBasicCreate;
+  if (result.userErrors?.length) {
+    const error = new Error(result.userErrors.map((item) => item.message).join("; "));
+    error.status = 422;
+    throw error;
+  }
+  if (!result.automaticDiscountNode?.id) throw new Error("Shopify no devolvió el descuento creado.");
+  return {
+    id: result.automaticDiscountNode.id,
+    title: result.automaticDiscountNode.automaticDiscount?.title || input.title,
+    status: result.automaticDiscountNode.automaticDiscount?.status || "SCHEDULED",
+    startsAt: result.automaticDiscountNode.automaticDiscount?.startsAt || input.startsAt,
+    endsAt: result.automaticDiscountNode.automaticDiscount?.endsAt || input.endsAt,
+  };
+}
+
+async function deleteAutomaticDiscount(shop, req, id) {
+  if (!id) return;
+  const data = await gql(
+    shop,
+    `mutation DeleteSummerDiscount($id:ID!){discountAutomaticDelete(id:$id){deletedAutomaticDiscountId userErrors{field code message}}}`,
+    { id },
+    req,
+  );
+  const errors = data.discountAutomaticDelete?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((item) => item.message).join("; "));
+}
+
+async function updateAutomaticBasicWindow(shop, req, id, input) {
+  const data = await gql(
+    shop,
+    `mutation UpdateSummerSuperseded($id:ID!,$input:DiscountAutomaticBasicInput!){discountAutomaticBasicUpdate(id:$id,automaticBasicDiscount:$input){automaticDiscountNode{id automaticDiscount{... on DiscountAutomaticBasic{title status startsAt endsAt}}}userErrors{field code message}}}`,
+    { id, input },
+    req,
+  );
+  const result = data.discountAutomaticBasicUpdate;
+  if (result.userErrors?.length) throw new Error(result.userErrors.map((item) => item.message).join("; "));
+  return { id: result.automaticDiscountNode?.id || id, ...(result.automaticDiscountNode?.automaticDiscount || {}) };
+}
+
+async function pauseSupersededDiscounts(shop, req) {
+  const paused = [];
+  try {
+    for (const discount of SUMMER_DAY_SUPERSEDED_DISCOUNTS) {
+      const updated = await updateAutomaticBasicWindow(shop, req, discount.id, { endsAt: SUMMER_DAY_MANIFEST.startsAt });
+      paused.push({ ...discount, ...updated });
+    }
+    return paused;
+  } catch (error) {
+    await Promise.allSettled(paused.map((discount) => updateAutomaticBasicWindow(shop, req, discount.id, { endsAt: null })));
+    throw error;
+  }
+}
+
+async function restoreSupersededDiscounts(shop, req, discounts = SUMMER_DAY_SUPERSEDED_DISCOUNTS) {
+  const results = await Promise.allSettled(
+    discounts.map((discount) => updateAutomaticBasicWindow(shop, req, discount.id, { endsAt: null })),
+  );
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length) throw new Error("No se pudieron reactivar todos los bundles sustituidos por Summer Day.");
+  return results.map((result) => result.value);
+}
+
+async function summerDiscountNodes(shop, req, ids) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  if (!uniqueIds.length) return [];
+  const data = await gql(
+    shop,
+    `query SummerDiscountNodes($ids:[ID!]!){nodes(ids:$ids){... on DiscountAutomaticNode{id automaticDiscount{__typename ... on DiscountAutomaticBasic{title status startsAt endsAt combinesWith{productDiscounts orderDiscounts shippingDiscounts}} ... on DiscountAutomaticApp{title status startsAt endsAt combinesWith{productDiscounts orderDiscounts shippingDiscounts} appDiscountType{functionId}}}}}}`,
+    { ids: uniqueIds },
+    req,
+  );
+  return (data.nodes || []).filter(Boolean).map((node) => ({ id: node.id, ...(node.automaticDiscount || {}) }));
+}
+
+async function cleanupExpiredSummerDay(shop, req) {
+  const initial = await readState(shop);
+  const now = Date.now();
+  const testExpired = initial?.summerDay?.test?.enabled && now >= Date.parse(initial.summerDay.test.endsAt || 0);
+  const productionExpired = initial?.summerDay?.production?.enabled && now >= Date.parse(initial.summerDay.production.endsAt || 0);
+  if (!testExpired && !productionExpired) return initial;
+  if (summerCleanupPromises.has(shop)) return summerCleanupPromises.get(shop);
+
+  const cleanup = (async () => {
+    const current = await readState(shop);
+    const summerDay = current?.summerDay || {};
+    let nextTest = summerDay.test;
+    let nextProduction = summerDay.production;
+    if (nextTest?.enabled && Date.now() >= Date.parse(nextTest.endsAt || 0)) {
+      if (nextTest.discount?.id) await deleteAutomaticDiscount(shop, req, nextTest.discount.id).catch(() => {});
+      nextTest = { ...nextTest, enabled: false, status: "expired", discount: null, disabledAt: new Date().toISOString() };
+    }
+    if (nextProduction?.enabled && Date.now() >= Date.parse(nextProduction.endsAt || 0)) {
+      await Promise.allSettled((nextProduction.discounts || []).map((discount) => deleteAutomaticDiscount(shop, req, discount.id)));
+      await restoreSupersededDiscounts(shop, req, nextProduction.pausedDiscounts);
+      nextProduction = {
+        ...nextProduction,
+        enabled: false,
+        status: "completed",
+        discounts: [],
+        pausedDiscounts: [],
+        disabledAt: new Date().toISOString(),
+      };
+    }
+    return updateState(shop, (latest) => ({
+      ...latest,
+      summerDay: { ...(latest.summerDay || {}), test: nextTest, production: nextProduction },
+    }));
+  })().finally(() => summerCleanupPromises.delete(shop));
+  summerCleanupPromises.set(shop, cleanup);
+  return cleanup;
+}
+
+async function summerStatus(req, res) {
+  try {
+    const shop = shopOf(req);
+    const state = await cleanupExpiredSummerDay(shop, req);
+    const summerDay = state?.summerDay || {};
+    const ids = [
+      summerDay.test?.discount?.id,
+      ...(summerDay.production?.discounts || []).map((discount) => discount.id),
+    ];
+    let nodes = [];
+    let permissionError = null;
+    try {
+      nodes = await summerDiscountNodes(shop, req, ids);
+    } catch (error) {
+      permissionError = error.message;
+    }
+    res.json({
+      manifest: summerManifestSummary(),
+      validation: summerDay.validation || null,
+      test: summerDay.test || null,
+      production: summerDay.production || null,
+      shopifyDiscounts: nodes,
+      permissionError,
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+async function validateSummerDay(req, res) {
+  try {
+    const shop = shopOf(req);
+    const validation = await resolveSummerProducts(shop, req);
+    await writeState(shop, { summerDay: { ...((await readState(shop))?.summerDay || {}), validation } });
+    res.status(validation.ok ? 200 : 409).json({ manifest: summerManifestSummary(), validation });
+  } catch (error) {
+    res.status(/access|scope|permission/i.test(error.message) ? 403 : 502).json({ error: error.message });
+  }
+}
+
+async function searchSummerProducts(req, res) {
+  try {
+    const query = String(req.query?.q || "").trim().slice(0, 100);
+    if (query.length < 2) return res.json({ products: [] });
+    const data = await gql(
+      shopOf(req),
+      `query SearchSummerProducts($query:String!){products(first:20,query:$query){nodes{id legacyResourceId title handle status tags featuredMedia{preview{image{url}}}variants(first:10){nodes{id title sku price compareAtPrice}}}}}`,
+      { query },
+      req,
+    );
+    res.json({ products: data.products?.nodes || [] });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+async function enableSummerTest(req, res) {
+  const shop = shopOf(req);
+  let created = null;
+  try {
+    const productId = String(req.body?.productId || "");
+    const percentage = Number(req.body?.percentage);
+    const durationMinutes = Math.max(1, Math.min(SUMMER_DAY_TEST_MAX_MINUTES, Number(req.body?.durationMinutes) || 15));
+    if (!/^gid:\/\/shopify\/Product\/\d+$/.test(productId)) return res.status(400).json({ error: "Producto no válido." });
+    if (!SUMMER_DAY_PERCENTAGES.includes(percentage)) return res.status(400).json({ error: "Descuento no válido." });
+    const state = await readState(shop);
+    if (state?.summerDay?.test?.discount?.id) {
+      return res.status(409).json({ error: "Ya existe una prueba activa. Desactívala antes de crear otra." });
+    }
+    if (state?.summerDay?.production?.enabled) {
+      return res.status(409).json({ error: "Cancela la campaña programada antes de iniciar una prueba." });
+    }
+    const productData = await gql(
+      shop,
+      `query SummerTestProduct($id:ID!){product(id:$id){id legacyResourceId title handle status featuredMedia{preview{image{url}}}variants(first:250){nodes{id sku price compareAtPrice}}}}`,
+      { id: productId },
+      req,
+    );
+    if (!productData.product) return res.status(404).json({ error: "Producto no encontrado." });
+    const pricePlan = summerProductPricePlan(productData.product.variants?.nodes || [], percentage);
+    if (!pricePlan.ok) return res.status(409).json({ error: "Las variantes del producto no comparten una regla de precio segura." });
+    if (!pricePlan.discountRequired) {
+      return res.status(409).json({ error: "El precio vigente ya es igual o mejor que el objetivo elegido; no hace falta añadir otro descuento." });
+    }
+    const startsAt = new Date(Date.now() - 30_000).toISOString();
+    const endsAt = new Date(Date.now() + durationMinutes * 60_000).toISOString();
+    created = await createSummerBasicDiscount(shop, req, summerBasicDiscountInput({
+      title: `GESTPLANT · SUMMER DAY TEST · ${percentage}% DESDE ORIGINAL`,
+      effectiveFraction: pricePlan.effectiveFraction,
+      productIds: [productId],
+      startsAt,
+      endsAt,
+    }));
+    const test = {
+      enabled: true,
+      percentage,
+      startsAt,
+      endsAt,
+      product: {
+        id: productData.product.id,
+        legacyResourceId: String(productData.product.legacyResourceId || ""),
+        title: productData.product.title,
+        handle: productData.product.handle,
+        image: productData.product.featuredMedia?.preview?.image?.url || null,
+      },
+      discount: created,
+      pricePlan,
+      activatedAt: new Date().toISOString(),
+    };
+    await updateState(shop, (current) => ({
+      ...current,
+      summerDay: { ...(current.summerDay || {}), test },
+    }));
+    res.json({ ok: true, test });
+  } catch (error) {
+    if (created?.id) await deleteAutomaticDiscount(shop, req, created.id).catch(() => {});
+    res.status(error.status || (/access|scope|permission/i.test(error.message) ? 403 : 502)).json({ error: error.message });
+  }
+}
+
+async function disableSummerTest(req, res) {
+  try {
+    const shop = shopOf(req);
+    const state = await readState(shop);
+    const test = state?.summerDay?.test;
+    if (test?.discount?.id) await deleteAutomaticDiscount(shop, req, test.discount.id);
+    await updateState(shop, (current) => ({
+      ...current,
+      summerDay: {
+        ...(current.summerDay || {}),
+        test: test ? { ...test, enabled: false, disabledAt: new Date().toISOString(), discount: null } : null,
+      },
+    }));
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+async function publishSummerDay(req, res) {
+  const shop = shopOf(req);
+  const created = [];
+  let pausedDiscounts = [];
+  try {
+    let state = await readState(shop);
+    if (state?.summerDay?.production?.discounts?.some((discount) => discount.id)) {
+      return res.status(409).json({ error: "Summer Day ya está programado. Cancélalo antes de reemplazarlo." });
+    }
+    if (state?.summerDay?.test?.enabled) {
+      return res.status(409).json({ error: "Desactiva la prueba antes de programar la campaña completa." });
+    }
+    const validation = await resolveSummerProducts(shop, req);
+    if (!validation.ok || validation.resolved.length !== SUMMER_DAY_MANIFEST.products.length) {
+      await updateState(shop, (current) => ({
+        ...current,
+        summerDay: { ...(current.summerDay || {}), validation },
+      }));
+      return res.status(409).json({ error: "La validación del catálogo no está completa.", validation });
+    }
+    const groups = validation.pricingGroups.map((effectiveFraction) => ({
+      effectiveFraction,
+      products: validation.resolved.filter((product) => product.pricePlan.effectiveFraction === effectiveFraction),
+    }));
+    pausedDiscounts = await pauseSupersededDiscounts(shop, req);
+    for (let index = 0; index < groups.length; index += 1) {
+      const group = groups[index];
+      const assignedRates = [...new Set(group.products.map((product) => product.discountPercent))].sort().join("/");
+      const discount = await createSummerBasicDiscount(shop, req, summerBasicDiscountInput({
+        title: `SUMMER DAY · ORIGINAL ${assignedRates}% · ${index + 1}/${groups.length}`,
+        effectiveFraction: group.effectiveFraction,
+        productIds: group.products.map((product) => product.productId),
+        startsAt: SUMMER_DAY_MANIFEST.startsAt,
+        endsAt: SUMMER_DAY_MANIFEST.endsAt,
+      }));
+      created.push({
+        productCount: group.products.length,
+        effectiveFraction: group.effectiveFraction,
+        effectivePercent: Math.round(Number(group.effectiveFraction) * 1_000_000) / 10_000,
+        ...discount,
+      });
+    }
+    const production = {
+      enabled: true,
+      status: "scheduled",
+      startsAt: SUMMER_DAY_MANIFEST.startsAt,
+      endsAt: SUMMER_DAY_MANIFEST.endsAt,
+      discounts: created,
+      pausedDiscounts,
+      priceRule: "min(currentPrice, originalPrice * (1 - percentage))",
+      scheduledAt: new Date().toISOString(),
+    };
+    state = await updateState(shop, (current) => ({
+      ...current,
+      summerDay: { ...(current.summerDay || {}), validation, production },
+    }));
+    res.json({ ok: true, manifest: summerManifestSummary(), production: state.summerDay.production });
+  } catch (error) {
+    await Promise.allSettled(created.map((discount) => deleteAutomaticDiscount(shop, req, discount.id)));
+    if (pausedDiscounts.length) await restoreSupersededDiscounts(shop, req, pausedDiscounts).catch(() => {});
+    res.status(error.status || (/access|scope|permission/i.test(error.message) ? 403 : 502)).json({
+      error: error.message,
+      rolledBack: created.length,
+    });
+  }
+}
+
+async function disableSummerProduction(req, res) {
+  try {
+    const shop = shopOf(req);
+    const state = await readState(shop);
+    const production = state?.summerDay?.production;
+    const ids = (production?.discounts || []).map((discount) => discount.id).filter(Boolean);
+    const results = await Promise.allSettled(ids.map((id) => deleteAutomaticDiscount(shop, req, id)));
+    const failed = results.filter((result) => result.status === "rejected");
+    if (failed.length) throw new Error("No se pudieron retirar todos los descuentos; vuelve a intentarlo.");
+    if (production?.pausedDiscounts?.length) await restoreSupersededDiscounts(shop, req, production.pausedDiscounts);
+    await updateState(shop, (current) => ({
+      ...current,
+      summerDay: {
+        ...(current.summerDay || {}),
+        production: production
+          ? { ...production, enabled: false, status: "cancelled", discounts: [], pausedDiscounts: [], disabledAt: new Date().toISOString() }
+          : null,
+      },
+    }));
+    res.json({ ok: true, removed: ids.length });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+async function summerStorefront(req, res) {
+  try {
+    const state = await cleanupExpiredSummerDay(DEFAULT_SHOP, req);
+    const summerDay = state?.summerDay || {};
+    const now = Date.now();
+    const campaigns = [];
+    const test = summerDay.test;
+    if (test?.enabled && test.discount?.id && now < Date.parse(test.endsAt)) {
+      campaigns.push({
+        mode: "test",
+        label: SUMMER_DAY_MANIFEST.display.label,
+        startsAt: test.startsAt,
+        endsAt: test.endsAt,
+        active: now >= Date.parse(test.startsAt) && now < Date.parse(test.endsAt),
+        products: [{
+          id: test.product.legacyResourceId,
+          handle: test.product.handle,
+          discountPercent: test.percentage,
+        }],
+      });
+    }
+    const production = summerDay.production;
+    if (production?.enabled && production.discounts?.length >= 1 && summerDay.validation?.ok) {
+      campaigns.push({
+        mode: "production",
+        label: SUMMER_DAY_MANIFEST.display.label,
+        startsAt: production.startsAt,
+        endsAt: production.endsAt,
+        active: now >= Date.parse(production.startsAt) && now < Date.parse(production.endsAt),
+        products: summerDay.validation.resolved.map((product) => ({
+          id: product.legacyResourceId,
+          handle: product.handle,
+          discountPercent: product.discountPercent,
+        })),
+      });
+    }
+    res.setHeader("Cache-Control", "public, max-age=15, stale-while-revalidate=30");
+    res.json({
+      id: SUMMER_DAY_MANIFEST.id,
+      timezone: SUMMER_DAY_MANIFEST.timezone,
+      display: SUMMER_DAY_MANIFEST.display,
+      generatedAt: new Date().toISOString(),
+      campaigns,
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+}
+
+app.get("/api/discounts/summer-day/status", summerStatus);
+app.post("/api/discounts/summer-day/validate", validateSummerDay);
+app.get("/api/discounts/products", searchSummerProducts);
+app.post("/api/discounts/summer-day/test/enable", enableSummerTest);
+app.post("/api/discounts/summer-day/test/disable", disableSummerTest);
+app.post("/api/discounts/summer-day/publish", publishSummerDay);
+app.post("/api/discounts/summer-day/disable", disableSummerProduction);
+app.get("/api/discounts/summer-day/storefront", summerStorefront);
+
 async function loadStrategy(shop, req) {
   const state = await readState(shop).catch(() => null);
   if (state?.strategy) {
@@ -491,7 +1214,7 @@ async function loadStrategy(shop, req) {
     return {
       ...memoryStrategy,
       versionCount: state.strategyVersions?.length || 0,
-      persistence: "neon_postgres",
+      persistence: "postgresql",
     };
   }
 
@@ -534,7 +1257,7 @@ async function loadPublishedStrategy(shop, req) {
       weights: normalizeWeights(state.publishedStrategy.weights),
       scoreRules: normalizeScoreRules(state.publishedStrategy.scoreRules),
       manualOverrides: normalizeManualOverrides(state.publishedStrategy.manualOverrides),
-      persistence: "neon_postgres",
+      persistence: "postgresql",
     };
   }
   return loadStrategy(shop, req);
@@ -584,7 +1307,7 @@ async function saveStrategy(shop, next, req, options = {}) {
   });
   rankingCache.clear();
 
-  let mirror = "neon_postgres";
+  let mirror = "postgresql";
   try {
     const installation = await gql(shop, "query{currentAppInstallation{id}}", {}, req);
     const output = await gql(
@@ -606,7 +1329,7 @@ async function saveStrategy(shop, next, req, options = {}) {
     if (output.metafieldsSet.userErrors?.length) {
       throw new Error(output.metafieldsSet.userErrors.map((error) => error.message).join("; "));
     }
-    mirror = "neon_postgres+shopify_app_metafield";
+    mirror = "postgresql+shopify_app_metafield";
   } catch {}
 
   return { ...strategy, versionCount: versions.length, persistence: mirror };
@@ -712,7 +1435,9 @@ const COUNTRY_COORDINATES = {
 };
 
 function geoFromRequest(req, overrides = {}) {
-  const country = String(overrides.country || req.headers["x-vercel-ip-country"] || "ES").toUpperCase();
+  const country = String(
+    overrides.country || req.headers["cf-ipcountry"] || req.headers["x-vercel-ip-country"] || "ES",
+  ).toUpperCase();
   const fallback = COUNTRY_COORDINATES[country] || COUNTRY_COORDINATES.ES;
   const latitude = Number(overrides.latitude ?? req.headers["x-vercel-ip-latitude"] ?? fallback[0]);
   const longitude = Number(overrides.longitude ?? req.headers["x-vercel-ip-longitude"] ?? fallback[1]);
@@ -756,7 +1481,12 @@ async function weatherFor(geo, overrideTemperature) {
       observedAt: data.current.time,
       source: "open_meteo",
     };
-    weatherCache.set(key, { value, expiresAt: Date.now() + WEATHER_TTL_MS });
+    setBoundedCache(
+      weatherCache,
+      key,
+      { value, expiresAt: Date.now() + WEATHER_TTL_MS },
+      WEATHER_CACHE_LIMIT,
+    );
     return value;
   } catch {
     const month = new Date().getUTCMonth();
@@ -1120,8 +1850,7 @@ async function publishCollectionRanking(shop, strategy, req, handle) {
 }
 
 app.get("/api/health", async (_req, res) => {
-  let persistence = "unavailable";
-  if (process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN) persistence = "neon_postgres";
+  const persistence = DATABASE_URL ? "postgresql" : "unavailable";
   res.json({
     ok: true,
     service: "trendsplant-ordering-app",
@@ -1137,7 +1866,7 @@ async function persistenceStatus(req, res) {
     const shop = shopOf(req);
     const state = await readState(shop);
     res.json({
-      connected: Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN),
+      connected: Boolean(DATABASE_URL),
       persisted: Boolean(state),
       hasToken: Boolean(state?.accessToken),
       hasStrategy: Boolean(state?.strategy),
@@ -1164,7 +1893,7 @@ async function persistenceMigrate(req, res) {
       strategy: { ...strategy, persistence: undefined },
       sessionMigratedAt: new Date().toISOString(),
     });
-    res.json({ ok: true, persistence: "neon_postgres" });
+    res.json({ ok: true, persistence: "postgresql" });
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
@@ -1333,8 +2062,11 @@ async function applyStrategy(req, res) {
 app.post("/api/strategy/apply", applyStrategy);
 app.post("/api/strategy-apply", applyStrategy);
 
-app.get("/auth/shopify", (req, res) => {
+app.get(["/auth/shopify", "/api/auth/shopify"], (req, res) => {
   const shop = shopOf(req);
+  if (!process.env.SHOPIFY_API_KEY || !process.env.SHOPIFY_API_SECRET || !process.env.SHOPIFY_APP_URL) {
+    return res.status(503).send("La autenticación de Shopify no está configurada en el servidor.");
+  }
   const state = crypto.randomBytes(16).toString("hex");
   const configuredScopes = String(
     process.env.SHOPIFY_SCOPES || "read_products,write_products,read_inventory,read_orders",
@@ -1342,7 +2074,7 @@ app.get("/auth/shopify", (req, res) => {
     .split(",")
     .map((scope) => scope.trim())
     .filter(Boolean);
-  const scopes = encodeURIComponent([...new Set([...configuredScopes, "write_webhooks"])].join(","));
+  const scopes = encodeURIComponent([...new Set(configuredScopes)].join(","));
   const redirect = encodeURIComponent((process.env.SHOPIFY_APP_URL || "") + "/api/auth/callback");
   cookie(res, "tp_oauth_state", seal({ state, shop }), 600);
   res.redirect(
@@ -1359,14 +2091,22 @@ app.get("/auth/shopify", (req, res) => {
   );
 });
 
-app.get("/auth/callback", async (req, res) => {
+app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
   const saved = open(
     String((req.headers.cookie || "").match(/(?:^|; )tp_oauth_state=([^;]+)/)?.[1] || ""),
   );
+  const requestedShop = String(req.query?.shop || "").toLowerCase().replace(/\.myshopify\.com$/, "");
   const shop = shopOf(req);
-  if (!saved || saved.state !== req.query.state || saved.shop !== shop) {
+  if (
+    requestedShop !== DEFAULT_SHOP ||
+    !validOAuthHmac(req.query || {}) ||
+    !saved ||
+    saved.state !== req.query.state ||
+    saved.shop !== shop
+  ) {
     return res.status(400).send("Estado OAuth inválido.");
   }
+  clearCookie(res, "tp_oauth_state");
   try {
     const response = await fetch("https://" + shop + ".myshopify.com/admin/oauth/access_token", {
       method: "POST",
@@ -1404,7 +2144,7 @@ app.get("/auth/callback", async (req, res) => {
 });
 
 app.get("/api/session", (req, res) => {
-  const session = sessionFrom(req);
+  const session = shopifySessionTokenFrom(req);
   res.json(
     session
       ? {
@@ -1415,6 +2155,12 @@ app.get("/api/session", (req, res) => {
         }
       : { authenticated: false },
   );
+});
+
+app.post("/api/logout", (req, res) => {
+  clearCookie(res, "tp_session");
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ ok: true });
 });
 
 function githubThemeAppConfigured() {
@@ -1761,14 +2507,21 @@ async function reconcileThemeReleaseMerge(number, expectedPreviewSha) {
 }
 
 async function ensureThemeReleaseLockStorage() {
-  if (themeReleaseLockStorageReady) return;
-  await database()`CREATE TABLE IF NOT EXISTS trendsplant_theme_release_locks (
-    shop TEXT PRIMARY KEY,
-    owner TEXT NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`;
-  themeReleaseLockStorageReady = true;
+  if (!themeReleaseLockStoragePromise) {
+    themeReleaseLockStoragePromise = database().begin(async (transaction) => {
+      await transaction`SELECT pg_advisory_xact_lock(81002002)`;
+      await transaction`CREATE TABLE IF NOT EXISTS trendsplant_theme_release_locks (
+        shop TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+    }).catch((error) => {
+      themeReleaseLockStoragePromise = null;
+      throw error;
+    });
+  }
+  await themeReleaseLockStoragePromise;
 }
 
 async function acquireThemeReleaseLock(shop, owner) {
@@ -1832,33 +2585,38 @@ async function readThemeReleaseGate(shop) {
 }
 
 async function ensureThemeReleaseAuditStorage() {
-  if (themeReleaseAuditStorageReady) return;
-  await database()`CREATE TABLE IF NOT EXISTS trendsplant_theme_release_audit (
-    id BIGSERIAL PRIMARY KEY,
-    request_id TEXT NOT NULL,
-    shop TEXT NOT NULL,
-    actor TEXT,
-    shopify_user_id TEXT,
-    event TEXT NOT NULL,
-    status TEXT NOT NULL,
-    source_branch TEXT NOT NULL,
-    target_branch TEXT NOT NULL,
-    preview_sha TEXT,
-    main_sha_before TEXT,
-    main_sha_after TEXT,
-    pull_request_number BIGINT,
-    pull_request_url TEXT,
-    error TEXT,
-    details JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`;
-  await database()`ALTER TABLE trendsplant_theme_release_audit
-    ADD COLUMN IF NOT EXISTS actor TEXT`;
-  await database()`ALTER TABLE trendsplant_theme_release_audit
-    ADD COLUMN IF NOT EXISTS shopify_user_id TEXT`;
-  await database()`CREATE INDEX IF NOT EXISTS trendsplant_theme_release_audit_shop_created_idx
-    ON trendsplant_theme_release_audit (shop, created_at DESC)`;
-  themeReleaseAuditStorageReady = true;
+  if (!themeReleaseAuditStoragePromise) {
+    themeReleaseAuditStoragePromise = database().begin(async (transaction) => {
+      await transaction`SELECT pg_advisory_xact_lock(81002003)`;
+      await transaction`CREATE TABLE IF NOT EXISTS trendsplant_theme_release_audit (
+        id BIGSERIAL PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        shop TEXT NOT NULL,
+        actor TEXT,
+        shopify_user_id TEXT,
+        event TEXT NOT NULL,
+        status TEXT NOT NULL,
+        source_branch TEXT NOT NULL,
+        target_branch TEXT NOT NULL,
+        preview_sha TEXT,
+        main_sha_before TEXT,
+        main_sha_after TEXT,
+        pull_request_number BIGINT,
+        pull_request_url TEXT,
+        error TEXT,
+        details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await transaction`ALTER TABLE trendsplant_theme_release_audit ADD COLUMN IF NOT EXISTS actor TEXT`;
+      await transaction`ALTER TABLE trendsplant_theme_release_audit ADD COLUMN IF NOT EXISTS shopify_user_id TEXT`;
+      await transaction`CREATE INDEX IF NOT EXISTS trendsplant_theme_release_audit_shop_created_idx
+        ON trendsplant_theme_release_audit (shop, created_at DESC)`;
+    }).catch((error) => {
+      themeReleaseAuditStoragePromise = null;
+      throw error;
+    });
+  }
+  await themeReleaseAuditStoragePromise;
 }
 
 async function appendThemeReleaseAudit(entry) {
@@ -2176,14 +2934,14 @@ function temperatureBand(value) {
 function eventAllowed(req, shop) {
   const anonymousId = String(req.headers["x-tp-session"] || req.body?.sessionId || "anonymous").slice(0, 100);
   const key = crypto.createHash("sha256").update(shop + ":" + anonymousId).digest("hex").slice(0, 24);
-  const now = Date.now();
-  const bucket = eventRateBuckets.get(key);
-  if (!bucket || now - bucket.startedAt >= EVENT_RATE_WINDOW_MS) {
-    eventRateBuckets.set(key, { startedAt: now, count: 1 });
-    return true;
-  }
-  bucket.count += 1;
-  if (bucket.count <= EVENT_RATE_LIMIT) return true;
+  const sessionAllowed = boundedRateAllowed(eventRateBuckets, key, EVENT_RATE_LIMIT, EVENT_RATE_WINDOW_MS);
+  const ipAllowed = boundedRateAllowed(
+    ipEventRateBuckets,
+    clientIp(req),
+    IP_EVENT_RATE_LIMIT,
+    EVENT_RATE_WINDOW_MS,
+  );
+  if (sessionAllowed && ipAllowed) return true;
   runtimeMetrics.rateLimited += 1;
   return false;
 }
@@ -2809,7 +3567,7 @@ async function analyticsSummary(req, res) {
         ordersWebhook: state?.integrations?.ordersWebhook || { active: false },
         alerts,
       },
-      persistence: "neon_postgres",
+      persistence: "postgresql",
     });
   } catch (error) {
     res.status(502).json({ error: error.message });
@@ -2821,8 +3579,10 @@ app.get("/api/analytics-summary", analyticsSummary);
 
 function validWebhookHmac(req) {
   const provided = String(req.headers["x-shopify-hmac-sha256"] || "");
+  const secret = String(process.env.SHOPIFY_API_SECRET || "");
+  if (!secret || !provided) return false;
   const expected = crypto
-    .createHmac("sha256", process.env.SHOPIFY_API_SECRET || "")
+    .createHmac("sha256", secret)
     .update(req.rawBody || Buffer.from(""))
     .digest("base64");
   const left = Buffer.from(provided);
@@ -2832,9 +3592,21 @@ function validWebhookHmac(req) {
 
 async function ordersCreateWebhook(req, res) {
   if (!validWebhookHmac(req)) return res.status(401).json({ error: "Firma de webhook no válida." });
+  const expectedShop = DEFAULT_SHOP + ".myshopify.com";
+  const headerShop = String(req.headers["x-shopify-shop-domain"] || "").toLowerCase();
+  const topic = String(req.headers["x-shopify-topic"] || "").toLowerCase();
+  const eventId = String(req.headers["x-shopify-event-id"] || "").trim();
+  if (headerShop !== expectedShop || topic !== "orders/create") {
+    return res.status(403).json({ error: "Webhook fuera del ámbito autorizado." });
+  }
+  if (!/^[a-z0-9-]{8,200}$/i.test(eventId)) {
+    return res.status(400).json({ error: "Identificador de webhook no válido." });
+  }
+  let claimed = false;
   try {
-    const headerShop = String(req.headers["x-shopify-shop-domain"] || "");
-    const shop = headerShop.replace(/\.myshopify\.com$/i, "") || DEFAULT_SHOP;
+    claimed = await claimWebhookEvent(eventId, DEFAULT_SHOP, topic);
+    if (!claimed) return res.status(200).json({ ok: true, duplicate: true });
+    const shop = DEFAULT_SHOP;
     const order = req.body || {};
     const country = String(
       order.shipping_address?.country_code || order.billing_address?.country_code || "unknown",
@@ -2853,6 +3625,7 @@ async function ordersCreateWebhook(req, res) {
     );
     res.status(200).json({ ok: true });
   } catch (error) {
+    if (claimed) await releaseWebhookEvent(eventId).catch(() => {});
     res.status(500).json({ error: error.message });
   }
 }
@@ -2860,8 +3633,9 @@ async function ordersCreateWebhook(req, res) {
 app.post("/api/webhooks/orders-create", ordersCreateWebhook);
 
 async function ensureOrdersWebhook(shop, req) {
-  const callbackUrl = (process.env.SHOPIFY_APP_URL || "https://parrillas-flame.vercel.app") +
-    "/api/webhooks/orders-create";
+  const appUrl = String(process.env.SHOPIFY_APP_URL || "").replace(/\/$/, "");
+  if (!appUrl) throw new Error("SHOPIFY_APP_URL no está configurada.");
+  const callbackUrl = appUrl + "/api/webhooks/orders-create";
   const current = await gql(
     shop,
     "query Hooks{webhookSubscriptions(first:50,topics:[ORDERS_CREATE]){nodes{id uri topic}}}",
@@ -2973,7 +3747,12 @@ app.get("/api/storefront-ranking", async (req, res) => {
       source,
       persistence: strategy.persistence,
     };
-    rankingCache.set(cacheKey, { value: payload, expiresAt: Date.now() + RANKING_TTL_MS });
+    setBoundedCache(
+      rankingCache,
+      cacheKey,
+      { value: payload, expiresAt: Date.now() + RANKING_TTL_MS },
+      RANKING_CACHE_LIMIT,
+    );
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader("X-Trendsplant-Cache", "MISS");
     res.json(payload);
@@ -2983,6 +3762,23 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
+
+export const __testing = {
+  authRequired,
+  eventAllowed,
+  open,
+  ordersCreateWebhook,
+  seal,
+  setBoundedCache,
+  shopifySessionTokenFrom,
+  validOAuthHmac,
+  validWebhookHmac,
+  resetRateLimits() {
+    eventRateBuckets.clear();
+    ipEventRateBuckets.clear();
+    publicReadRateBuckets.clear();
+  },
+};
 
 
 

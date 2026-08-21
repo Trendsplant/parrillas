@@ -1,0 +1,12 @@
+[Unit]
+Description=Copia local diaria de PostgreSQL para Parrillas
+
+[Timer]
+OnCalendar=*-*-* 03:20:00 Europe/Madrid
+Persistent=true
+RandomizedDelaySec=10m
+Unit=parrillas-backup.service
+
+[Install]
+WantedBy=timers.target
+

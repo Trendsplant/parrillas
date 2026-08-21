@@ -2,9 +2,9 @@
   "use strict";
 
   var INTEGRATION_VERSION = "scroll-safe-v5";
-  var script = document.currentScript || document.querySelector('script[src*="parrillas-flame.vercel.app/storefront.js"]');
+  var script = document.currentScript || document.querySelector('script[src$="/storefront.js"]');
   var cfg = window.TrendsplantOrdering || {};
-  var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || "https://parrillas-flame.vercel.app";
+  var app = cfg.appUrl || (script && new URL(script.src, location.href).origin) || location.origin;
   var shop = (window.Shopify && window.Shopify.shop) || location.hostname;
   var pathMatch = location.pathname.match(/\/collections\/([^/]+)/);
   var collectionPage = Boolean(pathMatch || cfg.collectionHandle);
@@ -486,4 +486,5 @@
   // This script only ranks a fixed batch of product cards after the theme
   // announces that it has finished appending that batch.
 })();
+
 

@@ -1,2 +1,7 @@
 .vercel
 .env*
+!.env.example
+backups/
+.npm-cache/
+node_modules/
+

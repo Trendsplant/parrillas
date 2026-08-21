@@ -18,6 +18,8 @@ const STATE_VERSION = 3;
 const WEATHER_TTL_MS = 15 * 60 * 1000;
 const SALES_TTL_MS = 15 * 60 * 1000;
 const RANKING_TTL_MS = 30 * 1000;
+const WEATHER_CACHE_LIMIT = 1000;
+const RANKING_CACHE_LIMIT = 2000;
 const EVENT_RATE_LIMIT = 120;
 const EVENT_RATE_WINDOW_MS = 60 * 1000;
 const IP_EVENT_RATE_LIMIT = 600;
@@ -49,6 +51,17 @@ const SUMMER_DAY_SUPERSEDED_DISCOUNTS = [
   { id: "gid://shopify/DiscountAutomaticNode/2275052945740", title: "Swimwear x3 Bundle" },
 ];
 const summerCleanupPromises = new Map();
+
+function assertSecurityConfiguration() {
+  if (String(process.env.SESSION_SECRET || "").trim().length < 32) {
+    throw new Error("SESSION_SECRET debe estar configurada con al menos 32 caracteres.");
+  }
+  if (!String(process.env.SHOPIFY_API_SECRET || "").trim()) {
+    throw new Error("SHOPIFY_API_SECRET debe estar configurada.");
+  }
+}
+
+assertSecurityConfiguration();
 
 const DEFAULT_STRATEGY = {
   enabled: true,
@@ -111,6 +124,7 @@ const runtimeMetrics = {
 app.use((req, res, next) => {
   const started = Date.now();
   runtimeMetrics.requests += 1;
+  if (req.path.startsWith("/api/")) res.setHeader("Cache-Control", "private, no-store, max-age=0");
   res.on("finish", () => {
     runtimeMetrics.latencyTotalMs += Date.now() - started;
     if (res.statusCode >= 500) runtimeMetrics.errors += 1;
@@ -123,19 +137,22 @@ function b64(buffer) {
 }
 
 function secretKeys() {
-  const values = [
-    process.env.SESSION_SECRET,
-    process.env.SHOPIFY_API_SECRET,
-    "development-only-key",
-  ].filter(Boolean);
+  const current = String(process.env.SESSION_SECRET || "").trim();
+  const previous = String(process.env.SESSION_SECRET_PREVIOUS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const values = [current, ...previous].filter(Boolean);
   return [...new Set(values)].map((value) =>
     crypto.createHash("sha256").update(value).digest(),
   );
 }
 
 function seal(value) {
+  const key = secretKeys()[0];
+  if (!key) throw new Error("SESSION_SECRET no está configurada.");
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", secretKeys()[0], iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const payload = Buffer.concat([
     cipher.update(JSON.stringify(value)),
     cipher.final(),
@@ -145,7 +162,9 @@ function seal(value) {
 }
 
 function open(value) {
+  if (!value || !secretKeys().length) return null;
   const payload = Buffer.from(value, "base64url");
+  if (payload.length < 29) return null;
   for (const key of secretKeys()) {
     try {
       const iv = payload.subarray(0, 12);
@@ -165,6 +184,7 @@ let sql;
 let stateStoragePromise = null;
 let themeReleaseLockStoragePromise = null;
 let themeReleaseAuditStoragePromise = null;
+let webhookEventStoragePromise = null;
 
 function database() {
   if (!DATABASE_URL) {
@@ -226,11 +246,52 @@ async function updateState(shop, updater) {
   });
 }
 
+async function ensureWebhookEventStorage() {
+  if (!webhookEventStoragePromise) {
+    webhookEventStoragePromise = database().begin(async (transaction) => {
+      await transaction`SELECT pg_advisory_xact_lock(81002004)`;
+      await transaction`CREATE TABLE IF NOT EXISTS trendsplant_webhook_events (
+        event_id TEXT PRIMARY KEY,
+        shop TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+      await transaction`CREATE INDEX IF NOT EXISTS trendsplant_webhook_events_received_at_idx
+        ON trendsplant_webhook_events (received_at)`;
+    }).catch((error) => {
+      webhookEventStoragePromise = null;
+      throw error;
+    });
+  }
+  await webhookEventStoragePromise;
+}
+
+async function claimWebhookEvent(eventId, shop, topic) {
+  await ensureWebhookEventStorage();
+  const rows = await database()`INSERT INTO trendsplant_webhook_events (event_id, shop, topic)
+    VALUES (${eventId}, ${shop}, ${topic})
+    ON CONFLICT (event_id) DO NOTHING
+    RETURNING event_id`;
+  if (rows.length) {
+    await database()`DELETE FROM trendsplant_webhook_events
+      WHERE received_at < NOW() - INTERVAL '30 days'`;
+  }
+  return rows.length === 1;
+}
+
+async function releaseWebhookEvent(eventId) {
+  await ensureWebhookEventStorage();
+  await database()`DELETE FROM trendsplant_webhook_events WHERE event_id = ${eventId}`;
+}
+
 function cookie(res, name, value, maxAge = 600) {
-  res.setHeader(
-    "Set-Cookie",
-    name + "=" + value + "; Path=/; Max-Age=" + maxAge + "; HttpOnly; Secure; SameSite=Lax",
-  );
+  const next = name + "=" + value + "; Path=/; Max-Age=" + maxAge + "; HttpOnly; Secure; SameSite=Lax";
+  const current = res.getHeader("Set-Cookie");
+  res.setHeader("Set-Cookie", current ? [...(Array.isArray(current) ? current : [current]), next] : next);
+}
+
+function clearCookie(res, name) {
+  cookie(res, name, "deleted", 0);
 }
 
 function shopifySessionTokenFrom(req) {
@@ -319,6 +380,21 @@ function shopOf(req) {
   return normalized === DEFAULT_SHOP ? DEFAULT_SHOP : DEFAULT_SHOP;
 }
 
+function validOAuthHmac(query = {}) {
+  const secret = String(process.env.SHOPIFY_API_SECRET || "");
+  const provided = String(query.hmac || "");
+  if (!secret || !/^[a-f0-9]{64}$/i.test(provided)) return false;
+  const message = Object.entries(query)
+    .filter(([key]) => key !== "hmac" && key !== "signature")
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => key + "=" + (Array.isArray(value) ? value.join(",") : String(value)))
+    .join("&");
+  const expected = crypto.createHmac("sha256", secret).update(message).digest("hex");
+  const left = Buffer.from(provided, "hex");
+  const right = Buffer.from(expected, "hex");
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
 function clientIp(req) {
   const value = String(req.ip || req.socket?.remoteAddress || "unknown").split(",")[0].trim();
   return value.replace(/^::ffff:/, "").slice(0, 80) || "unknown";
@@ -340,6 +416,15 @@ function boundedRateAllowed(store, key, limit, windowMs) {
   }
   bucket.count += 1;
   return bucket.count <= limit;
+}
+
+function setBoundedCache(store, key, value, limit) {
+  const now = Date.now();
+  for (const [candidate, entry] of store) {
+    if (!entry || Number(entry.expiresAt || 0) <= now) store.delete(candidate);
+  }
+  if (!store.has(key) && store.size >= limit) store.delete(store.keys().next().value);
+  store.set(key, value);
 }
 
 function publicReadLimit(req, res, next) {
@@ -469,7 +554,7 @@ function authRequired(req, res, next) {
     "/api/discounts/summer-day/storefront",
     "/api/webhooks/orders-create",
   ];
-  if (publicPaths.includes(req.path) || sessionFrom(req)) return next();
+  if (publicPaths.includes(req.path) || shopifySessionTokenFrom(req)) return next();
   res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
   return res.status(401).json({
     error: "Autenticación requerida.",
@@ -1396,7 +1481,12 @@ async function weatherFor(geo, overrideTemperature) {
       observedAt: data.current.time,
       source: "open_meteo",
     };
-    weatherCache.set(key, { value, expiresAt: Date.now() + WEATHER_TTL_MS });
+    setBoundedCache(
+      weatherCache,
+      key,
+      { value, expiresAt: Date.now() + WEATHER_TTL_MS },
+      WEATHER_CACHE_LIMIT,
+    );
     return value;
   } catch {
     const month = new Date().getUTCMonth();
@@ -2005,10 +2095,18 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
   const saved = open(
     String((req.headers.cookie || "").match(/(?:^|; )tp_oauth_state=([^;]+)/)?.[1] || ""),
   );
+  const requestedShop = String(req.query?.shop || "").toLowerCase().replace(/\.myshopify\.com$/, "");
   const shop = shopOf(req);
-  if (!saved || saved.state !== req.query.state || saved.shop !== shop) {
+  if (
+    requestedShop !== DEFAULT_SHOP ||
+    !validOAuthHmac(req.query || {}) ||
+    !saved ||
+    saved.state !== req.query.state ||
+    saved.shop !== shop
+  ) {
     return res.status(400).send("Estado OAuth inválido.");
   }
+  clearCookie(res, "tp_oauth_state");
   try {
     const response = await fetch("https://" + shop + ".myshopify.com/admin/oauth/access_token", {
       method: "POST",
@@ -2046,7 +2144,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
 });
 
 app.get("/api/session", (req, res) => {
-  const session = sessionFrom(req);
+  const session = shopifySessionTokenFrom(req);
   res.json(
     session
       ? {
@@ -2830,14 +2928,14 @@ function temperatureBand(value) {
 function eventAllowed(req, shop) {
   const anonymousId = String(req.headers["x-tp-session"] || req.body?.sessionId || "anonymous").slice(0, 100);
   const key = crypto.createHash("sha256").update(shop + ":" + anonymousId).digest("hex").slice(0, 24);
-  const now = Date.now();
-  const bucket = eventRateBuckets.get(key);
-  if (!bucket || now - bucket.startedAt >= EVENT_RATE_WINDOW_MS) {
-    eventRateBuckets.set(key, { startedAt: now, count: 1 });
-    return true;
-  }
-  bucket.count += 1;
-  if (bucket.count <= EVENT_RATE_LIMIT) return true;
+  const sessionAllowed = boundedRateAllowed(eventRateBuckets, key, EVENT_RATE_LIMIT, EVENT_RATE_WINDOW_MS);
+  const ipAllowed = boundedRateAllowed(
+    ipEventRateBuckets,
+    clientIp(req),
+    IP_EVENT_RATE_LIMIT,
+    EVENT_RATE_WINDOW_MS,
+  );
+  if (sessionAllowed && ipAllowed) return true;
   runtimeMetrics.rateLimited += 1;
   return false;
 }
@@ -3475,8 +3573,10 @@ app.get("/api/analytics-summary", analyticsSummary);
 
 function validWebhookHmac(req) {
   const provided = String(req.headers["x-shopify-hmac-sha256"] || "");
+  const secret = String(process.env.SHOPIFY_API_SECRET || "");
+  if (!secret || !provided) return false;
   const expected = crypto
-    .createHmac("sha256", process.env.SHOPIFY_API_SECRET || "")
+    .createHmac("sha256", secret)
     .update(req.rawBody || Buffer.from(""))
     .digest("base64");
   const left = Buffer.from(provided);
@@ -3486,9 +3586,21 @@ function validWebhookHmac(req) {
 
 async function ordersCreateWebhook(req, res) {
   if (!validWebhookHmac(req)) return res.status(401).json({ error: "Firma de webhook no válida." });
+  const expectedShop = DEFAULT_SHOP + ".myshopify.com";
+  const headerShop = String(req.headers["x-shopify-shop-domain"] || "").toLowerCase();
+  const topic = String(req.headers["x-shopify-topic"] || "").toLowerCase();
+  const eventId = String(req.headers["x-shopify-event-id"] || "").trim();
+  if (headerShop !== expectedShop || topic !== "orders/create") {
+    return res.status(403).json({ error: "Webhook fuera del ámbito autorizado." });
+  }
+  if (!/^[a-z0-9-]{8,200}$/i.test(eventId)) {
+    return res.status(400).json({ error: "Identificador de webhook no válido." });
+  }
+  let claimed = false;
   try {
-    const headerShop = String(req.headers["x-shopify-shop-domain"] || "");
-    const shop = headerShop.replace(/\.myshopify\.com$/i, "") || DEFAULT_SHOP;
+    claimed = await claimWebhookEvent(eventId, DEFAULT_SHOP, topic);
+    if (!claimed) return res.status(200).json({ ok: true, duplicate: true });
+    const shop = DEFAULT_SHOP;
     const order = req.body || {};
     const country = String(
       order.shipping_address?.country_code || order.billing_address?.country_code || "unknown",
@@ -3507,6 +3619,7 @@ async function ordersCreateWebhook(req, res) {
     );
     res.status(200).json({ ok: true });
   } catch (error) {
+    if (claimed) await releaseWebhookEvent(eventId).catch(() => {});
     res.status(500).json({ error: error.message });
   }
 }
@@ -3628,7 +3741,12 @@ app.get("/api/storefront-ranking", async (req, res) => {
       source,
       persistence: strategy.persistence,
     };
-    rankingCache.set(cacheKey, { value: payload, expiresAt: Date.now() + RANKING_TTL_MS });
+    setBoundedCache(
+      rankingCache,
+      cacheKey,
+      { value: payload, expiresAt: Date.now() + RANKING_TTL_MS },
+      RANKING_CACHE_LIMIT,
+    );
     res.setHeader("Cache-Control", "private, no-store, max-age=0");
     res.setHeader("X-Trendsplant-Cache", "MISS");
     res.json(payload);
@@ -3638,6 +3756,23 @@ app.get("/api/storefront-ranking", async (req, res) => {
 });
 
 export default app;
+
+export const __testing = {
+  authRequired,
+  eventAllowed,
+  open,
+  ordersCreateWebhook,
+  seal,
+  setBoundedCache,
+  shopifySessionTokenFrom,
+  validOAuthHmac,
+  validWebhookHmac,
+  resetRateLimits() {
+    eventRateBuckets.clear();
+    ipEventRateBuckets.clear();
+    publicReadRateBuckets.clear();
+  },
+};
 
 
 

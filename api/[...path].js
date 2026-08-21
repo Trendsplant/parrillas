@@ -365,13 +365,28 @@ function sessionFrom(req) {
   const createdAt = Number(session?.createdAt || 0);
   if (
     !session ||
+    session.shop !== DEFAULT_SHOP ||
     !createdAt ||
     createdAt > Date.now() + 5 * 60 * 1000 ||
     Date.now() - createdAt > ADMIN_SESSION_MAX_AGE_MS
   ) {
     return null;
   }
-  return session;
+  return { ...session, authenticatedBy: "oauth_cookie" };
+}
+
+function validCookieMutationOrigin(req) {
+  if (["GET", "HEAD", "OPTIONS"].includes(String(req.method || "GET").toUpperCase())) return true;
+  const origin = String(req.headers?.origin || "").trim();
+  const host = String(req.headers?.host || "").trim().toLowerCase();
+  if (!origin || !host) return false;
+  try {
+    const parsed = new URL(origin);
+    const local = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    return parsed.host.toLowerCase() === host && (parsed.protocol === "https:" || local);
+  } catch {
+    return false;
+  }
 }
 
 function shopOf(req) {
@@ -554,7 +569,15 @@ function authRequired(req, res, next) {
     "/api/discounts/summer-day/storefront",
     "/api/webhooks/orders-create",
   ];
-  if (publicPaths.includes(req.path) || shopifySessionTokenFrom(req)) return next();
+  if (publicPaths.includes(req.path)) return next();
+  const session = sessionFrom(req);
+  if (session) {
+    if (session.authenticatedBy === "oauth_cookie" && !validCookieMutationOrigin(req)) {
+      return res.status(403).json({ error: "Origen de la solicitud no permitido." });
+    }
+    req.adminSession = session;
+    return next();
+  }
   res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
   return res.status(401).json({
     error: "Autenticación requerida.",
@@ -2144,7 +2167,7 @@ app.get(["/auth/callback", "/api/auth/callback"], async (req, res) => {
 });
 
 app.get("/api/session", (req, res) => {
-  const session = shopifySessionTokenFrom(req);
+  const session = sessionFrom(req);
   res.json(
     session
       ? {
